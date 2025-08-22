@@ -28,11 +28,13 @@ import (
 	"tailscale.com/net/netcheck"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/packet"
+	"tailscale.com/net/sockopts"
 	"tailscale.com/net/stun"
 	"tailscale.com/net/udprelay/endpoint"
 	"tailscale.com/tstime"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/nettype"
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/set"
 )
@@ -450,6 +452,30 @@ func (c *singlePacketConn) WriteBatchTo(buffs [][]byte, addr netip.AddrPort, gen
 	return nil
 }
 
+// UDP socket read/write buffer size (7MB). At the time of writing (2025-08-21)
+// this value was heavily influenced by magicsock, with similar motivations for
+// its increase relative to typical defaults, e.g. long fat networks and
+// reducing packet loss around crypto/syscall-induced delay.
+const socketBufferSize = 7 << 20
+
+func trySetUDPSocketOptions(pconn nettype.PacketConn, logf logger.Logf) {
+	directions := []sockopts.BufferDirection{sockopts.ReadDirection, sockopts.WriteDirection}
+	for _, direction := range directions {
+		errForce, errPortable := sockopts.SetBufferSize(pconn, direction, socketBufferSize)
+		if errForce != nil {
+			logf("[warning] failed to force-set UDP %v buffer size to %d: %v; using kernel default values (impacts throughput only)", direction, socketBufferSize, errForce)
+		}
+		if errPortable != nil {
+			logf("failed to set UDP %v buffer size to %d: %v", direction, socketBufferSize, errPortable)
+		}
+	}
+
+	err := sockopts.SetICMPErrImmunity(pconn)
+	if err != nil {
+		logf("failed to set ICMP error immunity: %v", err)
+	}
+}
+
 // listenOn binds an IPv4 and IPv6 socket to port. We consider it successful if
 // we manage to bind the IPv4 socket.
 //
@@ -473,6 +499,7 @@ func (s *Server) listenOn(port int) error {
 				break
 			}
 		}
+		trySetUDPSocketOptions(uc, s.logf)
 		// TODO: set IP_PKTINFO sockopt
 		_, boundPortStr, err := net.SplitHostPort(uc.LocalAddr().String())
 		if err != nil {
