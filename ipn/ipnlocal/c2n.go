@@ -4,9 +4,7 @@
 package ipnlocal
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -15,21 +13,26 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"tailscale.com/clientupdate"
+	"tailscale.com/control/controlclient"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/posture"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/netmap"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/goroutines"
+	"tailscale.com/util/httpm"
 	"tailscale.com/util/set"
-	"tailscale.com/util/syspolicy"
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/ptype"
 	"tailscale.com/version"
 	"tailscale.com/version/distro"
 )
@@ -45,6 +48,7 @@ var c2nHandlers = map[methodAndPath]c2nHandler{
 	req("/debug/metrics"):           handleC2NDebugMetrics,
 	req("/debug/component-logging"): handleC2NDebugComponentLogging,
 	req("/debug/logheap"):           handleC2NDebugLogHeap,
+	req("/debug/netmap"):            handleC2NDebugNetMap,
 
 	// PPROF - We only expose a subset of typical pprof endpoints for security.
 	req("/debug/pprof/heap"):   handleC2NPprof,
@@ -52,9 +56,6 @@ var c2nHandlers = map[methodAndPath]c2nHandler{
 
 	req("POST /logtail/flush"): handleC2NLogtailFlush,
 	req("POST /sockstats"):     handleC2NSockStats,
-
-	// Check TLS certificate status.
-	req("GET /tls-cert-status"): handleC2NTLSCertStatus,
 
 	// SSH
 	req("/ssh/usernames"): handleC2NSSHUsernames,
@@ -71,9 +72,6 @@ var c2nHandlers = map[methodAndPath]c2nHandler{
 
 	// Linux netfilter.
 	req("POST /netfilter-kind"): handleC2NSetNetfilterKind,
-
-	// VIP services.
-	req("GET /vip-services"): handleC2NVIPServicesGet,
 }
 
 // RegisterC2N registers a new c2n handler for the given pattern.
@@ -147,6 +145,66 @@ func handleC2NLogtailFlush(b *LocalBackend, w http.ResponseWriter, r *http.Reque
 	} else {
 		http.Error(w, "no log flusher wired up", http.StatusInternalServerError)
 	}
+}
+
+func handleC2NDebugNetMap(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if r.Method != httpm.POST && r.Method != httpm.GET {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	b.logf("c2n: %s /debug/netmap received", r.Method)
+
+	// redactAndMarshal redacts private keys from the given netmap, clears fields
+	// that should be omitted, and marshals it to JSON.
+	redactAndMarshal := func(nm *netmap.NetworkMap, omitFields []string) (json.RawMessage, error) {
+		for _, f := range omitFields {
+			field := reflect.ValueOf(nm).Elem().FieldByName(f)
+			if !field.IsValid() {
+				b.logf("c2n: /debug/netmap: unknown field %q in omitFields", f)
+				continue
+			}
+			field.SetZero()
+		}
+		nm, _ = redactNetmapPrivateKeys(nm)
+		return json.Marshal(nm)
+	}
+
+	var omitFields []string
+	resp := &tailcfg.C2NDebugNetmapResponse{}
+
+	if r.Method == httpm.POST {
+		var req tailcfg.C2NDebugNetmapRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("failed to decode request body: %v", err), http.StatusBadRequest)
+			return
+		}
+		omitFields = req.OmitFields
+
+		if req.Candidate != nil {
+			cand, err := controlclient.NetmapFromMapResponseForDebug(ctx, b.unsanitizedPersist(), req.Candidate)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to convert candidate MapResponse: %v", err), http.StatusBadRequest)
+				return
+			}
+			candJSON, err := redactAndMarshal(cand, omitFields)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to marshal candidate netmap: %v", err), http.StatusInternalServerError)
+				return
+			}
+			resp.Candidate = candJSON
+		}
+	}
+
+	var err error
+	resp.Current, err = redactAndMarshal(b.currentNode().netMapWithPeers(), omitFields)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to marshal current netmap: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, resp)
 }
 
 func handleC2NDebugGoroutines(_ *LocalBackend, w http.ResponseWriter, r *http.Request) {
@@ -279,16 +337,6 @@ func handleC2NSetNetfilterKind(b *LocalBackend, w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleC2NVIPServicesGet(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
-	b.logf("c2n: GET /vip-services received")
-	var res tailcfg.C2NVIPServicesResponse
-	res.VIPServices = b.VIPServices()
-	res.ServicesHash = b.vipServiceHash(res.VIPServices)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
-}
-
 func handleC2NUpdateGet(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
 	b.logf("c2n: GET /update received")
 
@@ -342,7 +390,7 @@ func handleC2NPostureIdentityGet(b *LocalBackend, w http.ResponseWriter, r *http
 	// this will first check syspolicy, MDM settings like Registry
 	// on Windows or defaults on macOS. If they are not set, it falls
 	// back to the cli-flag, `--posture-checking`.
-	choice, err := syspolicy.GetPreferenceOption(syspolicy.PostureChecking)
+	choice, err := b.polc.GetPreferenceOption(pkey.PostureChecking, ptype.ShowChoiceByPolicy)
 	if err != nil {
 		b.logf(
 			"c2n: failed to read PostureChecking from syspolicy, returning default from CLI: %s; got error: %s",
@@ -352,7 +400,7 @@ func handleC2NPostureIdentityGet(b *LocalBackend, w http.ResponseWriter, r *http
 	}
 
 	if choice.ShouldEnable(b.Prefs().PostureChecking()) {
-		res.SerialNumbers, err = posture.GetSerialNumbers(b.logf)
+		res.SerialNumbers, err = posture.GetSerialNumbers(b.polc, b.logf)
 		if err != nil {
 			b.logf("c2n: GetSerialNumbers returned error: %v", err)
 		}
@@ -508,55 +556,4 @@ func tailscaleUpdateCmd(cmdTS string) *exec.Cmd {
 func regularFileExists(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.Mode().IsRegular()
-}
-
-// handleC2NTLSCertStatus returns info about the last TLS certificate issued for the
-// provided domain. This can be called by the controlplane to clean up DNS TXT
-// records when they're no longer needed by LetsEncrypt.
-//
-// It does not kick off a cert fetch or async refresh. It only reports anything
-// that's already sitting on disk, and only reports metadata about the public
-// cert (stuff that'd be the in CT logs anyway).
-func handleC2NTLSCertStatus(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
-	cs, err := b.getCertStore()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	domain := r.FormValue("domain")
-	if domain == "" {
-		http.Error(w, "no 'domain'", http.StatusBadRequest)
-		return
-	}
-
-	ret := &tailcfg.C2NTLSCertInfo{}
-	pair, err := getCertPEMCached(cs, domain, b.clock.Now())
-	ret.Valid = err == nil
-	if err != nil {
-		ret.Error = err.Error()
-		if errors.Is(err, errCertExpired) {
-			ret.Expired = true
-		} else if errors.Is(err, ipn.ErrStateNotExist) {
-			ret.Missing = true
-			ret.Error = "no certificate"
-		}
-	} else {
-		block, _ := pem.Decode(pair.CertPEM)
-		if block == nil {
-			ret.Error = "invalid PEM"
-			ret.Valid = false
-		} else {
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				ret.Error = fmt.Sprintf("invalid certificate: %v", err)
-				ret.Valid = false
-			} else {
-				ret.NotBefore = cert.NotBefore.UTC().Format(time.RFC3339)
-				ret.NotAfter = cert.NotAfter.UTC().Format(time.RFC3339)
-			}
-		}
-	}
-
-	writeJSON(w, ret)
 }

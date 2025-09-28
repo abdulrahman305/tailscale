@@ -21,6 +21,7 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/clientmetric"
+	"tailscale.com/util/eventbus"
 )
 
 var debug = envknob.RegisterBool("TS_DEBUG_PROFILES")
@@ -180,7 +181,7 @@ func (pm *profileManager) SwitchToProfile(profile ipn.LoginProfileView) (cp ipn.
 		f(pm.currentProfile, pm.prefs, false)
 	}
 	// Do not call pm.extHost.NotifyProfileChange here; it is invoked in
-	// [LocalBackend.resetForProfileChangeLocked] after the netmap reset.
+	// [LocalBackend.resetForProfileChangeLockedOnEntry] after the netmap reset.
 	// TODO(nickkhyl): Consider moving it here (or into the stateChangeCb handler
 	// in [LocalBackend]) once the profile/node state, including the netmap,
 	// is actually tied to the current profile.
@@ -359,9 +360,9 @@ func (pm *profileManager) SetPrefs(prefsIn ipn.PrefsView, np ipn.NetworkProfile)
 	// where prefsIn is the previous profile's prefs with an updated Persist, LoggedOut,
 	// WantRunning and possibly other fields. This may not be the desired behavior.
 	//
-	// Additionally, LocalBackend doesn't treat it as a proper profile switch,
-	// meaning that [LocalBackend.resetForProfileChangeLocked] is not called and
-	// certain node/profile-specific state may not be reset as expected.
+	// Additionally, LocalBackend doesn't treat it as a proper profile switch, meaning that
+	// [LocalBackend.resetForProfileChangeLockedOnEntry] is not called and certain
+	// node/profile-specific state may not be reset as expected.
 	//
 	// However, [profileManager] notifies [ipnext.Extension]s about the profile change,
 	// so features migrated from LocalBackend to external packages should not be affected.
@@ -494,9 +495,10 @@ func (pm *profileManager) setProfilePrefsNoPermCheck(profile ipn.LoginProfileVie
 		oldPrefs := pm.prefs
 		pm.prefs = clonedPrefs
 
-		// Sadly, profile prefs can be changed in multiple ways.  It's pretty
-		// chaotic, and in many cases callers use unexported methods of the
-		// profile manager instead of going through [LocalBackend.setPrefsLocked]
+		// Sadly, profile prefs can be changed in multiple ways.
+		// It's pretty chaotic, and in many cases callers use
+		// unexported methods of the profile manager instead of
+		// going through [LocalBackend.setPrefsLockedOnEntry]
 		// or at least using [profileManager.SetPrefs].
 		//
 		// While we should definitely clean this up to improve
@@ -837,7 +839,9 @@ func (pm *profileManager) CurrentPrefs() ipn.PrefsView {
 
 // ReadStartupPrefsForTest reads the startup prefs from disk. It is only used for testing.
 func ReadStartupPrefsForTest(logf logger.Logf, store ipn.StateStore) (ipn.PrefsView, error) {
-	ht := new(health.Tracker) // in tests, don't care about the health status
+	bus := eventbus.New()
+	defer bus.Close()
+	ht := health.NewTracker(bus) // in tests, don't care about the health status
 	pm, err := newProfileManager(store, logf, ht)
 	if err != nil {
 		return ipn.PrefsView{}, err

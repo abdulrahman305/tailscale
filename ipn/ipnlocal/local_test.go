@@ -34,6 +34,7 @@ import (
 	"tailscale.com/control/controlclient"
 	"tailscale.com/drive"
 	"tailscale.com/drive/driveimpl"
+	_ "tailscale.com/feature/condregister/portmapper"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
@@ -47,6 +48,7 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsd"
 	"tailscale.com/tstest"
+	"tailscale.com/tstest/deptest"
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
@@ -58,11 +60,13 @@ import (
 	"tailscale.com/types/views"
 	"tailscale.com/util/dnsname"
 	"tailscale.com/util/eventbus"
+	"tailscale.com/util/eventbus/eventbustest"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/must"
 	"tailscale.com/util/set"
 	"tailscale.com/util/syspolicy"
-	"tailscale.com/util/syspolicy/setting"
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/policytest"
 	"tailscale.com/util/syspolicy/source"
 	"tailscale.com/wgengine"
 	"tailscale.com/wgengine/filter"
@@ -453,7 +457,8 @@ func (panicOnUseTransport) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 func newTestLocalBackend(t testing.TB) *LocalBackend {
-	return newTestLocalBackendWithSys(t, tsd.NewSystem())
+	bus := eventbustest.NewBus(t)
+	return newTestLocalBackendWithSys(t, tsd.NewSystemWithBus(bus))
 }
 
 // newTestLocalBackendWithSys creates a new LocalBackend with the given tsd.System.
@@ -466,7 +471,7 @@ func newTestLocalBackendWithSys(t testing.TB, sys *tsd.System) *LocalBackend {
 		t.Log("Added memory store for testing")
 	}
 	if _, ok := sys.Engine.GetOK(); !ok {
-		eng, err := wgengine.NewFakeUserspaceEngine(logf, sys.Set, sys.HealthTracker(), sys.UserMetricsRegistry(), sys.Bus.Get())
+		eng, err := wgengine.NewFakeUserspaceEngine(logf, sys.Set, sys.HealthTracker.Get(), sys.UserMetricsRegistry(), sys.Bus.Get())
 		if err != nil {
 			t.Fatalf("NewFakeUserspaceEngine: %v", err)
 		}
@@ -531,7 +536,6 @@ func TestZeroExitNodeViaLocalAPI(t *testing.T) {
 			ExitNodeID: "",
 		},
 	}, user)
-
 	if err != nil {
 		t.Fatalf("enabling first exit node: %v", err)
 	}
@@ -541,7 +545,6 @@ func TestZeroExitNodeViaLocalAPI(t *testing.T) {
 	if got, want := pv.InternalExitNodePrior(), tailcfg.StableNodeID(""); got != want {
 		t.Fatalf("unexpected InternalExitNodePrior %q, want: %q", got, want)
 	}
-
 }
 
 func TestSetUseExitNodeEnabled(t *testing.T) {
@@ -629,7 +632,7 @@ func TestConfigureExitNode(t *testing.T) {
 		exitNodeIDPolicy       *tailcfg.StableNodeID
 		exitNodeIPPolicy       *netip.Addr
 		exitNodeAllowedIDs     []tailcfg.StableNodeID // nil if all IDs are allowed for auto exit nodes
-		exitNodeAllowOverride  bool                   // whether [syspolicy.AllowExitNodeOverride] should be set to true
+		exitNodeAllowOverride  bool                   // whether [pkey.AllowExitNodeOverride] should be set to true
 		wantChangePrefsErr     error                  // if non-nil, the error we expect from [LocalBackend.EditPrefsAs]
 		wantPrefs              ipn.Prefs
 		wantExitNodeToggleErr  error // if non-nil, the error we expect from [LocalBackend.SetUseExitNodeEnabled]
@@ -967,7 +970,7 @@ func TestConfigureExitNode(t *testing.T) {
 			name: "auto-any-via-policy/no-netmap/with-disallowed-existing", // same, but now with a syspolicy setting that does not allow the existing exit node ID
 			prefs: ipn.Prefs{
 				ControlURL: controlURL,
-				ExitNodeID: exitNode2.StableID(), // not allowed by [syspolicy.AllowedSuggestedExitNodes]
+				ExitNodeID: exitNode2.StableID(), // not allowed by [pkey.AllowedSuggestedExitNodes]
 			},
 			netMap:           nil,
 			report:           report,
@@ -986,7 +989,7 @@ func TestConfigureExitNode(t *testing.T) {
 			name: "auto-any-via-policy/with-netmap/with-allowed-existing", // same, but now with a syspolicy setting that does not allow the existing exit node ID
 			prefs: ipn.Prefs{
 				ControlURL: controlURL,
-				ExitNodeID: exitNode1.StableID(), // not allowed by [syspolicy.AllowedSuggestedExitNodes]
+				ExitNodeID: exitNode1.StableID(), // not allowed by [pkey.AllowedSuggestedExitNodes]
 			},
 			netMap:           clientNetmap,
 			report:           report,
@@ -1069,7 +1072,7 @@ func TestConfigureExitNode(t *testing.T) {
 			wantHostinfoExitNodeID: exitNode1.StableID(),
 		},
 		{
-			name: "auto-any-via-policy/allow-override/change", // changing the exit node is allowed by [syspolicy.AllowExitNodeOverride]
+			name: "auto-any-via-policy/allow-override/change", // changing the exit node is allowed by [pkey.AllowExitNodeOverride]
 			prefs: ipn.Prefs{
 				ControlURL: controlURL,
 			},
@@ -1091,7 +1094,7 @@ func TestConfigureExitNode(t *testing.T) {
 			wantHostinfoExitNodeID: exitNode2.StableID(),
 		},
 		{
-			name: "auto-any-via-policy/allow-override/clear", // clearing the exit node ID is not allowed by [syspolicy.AllowExitNodeOverride]
+			name: "auto-any-via-policy/allow-override/clear", // clearing the exit node ID is not allowed by [pkey.AllowExitNodeOverride]
 			prefs: ipn.Prefs{
 				ControlURL: controlURL,
 			},
@@ -1115,7 +1118,7 @@ func TestConfigureExitNode(t *testing.T) {
 			wantHostinfoExitNodeID: exitNode1.StableID(),
 		},
 		{
-			name: "auto-any-via-policy/allow-override/toggle-off", // similarly, toggling off the exit node is not allowed even with [syspolicy.AllowExitNodeOverride]
+			name: "auto-any-via-policy/allow-override/toggle-off", // similarly, toggling off the exit node is not allowed even with [pkey.AllowExitNodeOverride]
 			prefs: ipn.Prefs{
 				ControlURL: controlURL,
 			},
@@ -1176,36 +1179,32 @@ func TestConfigureExitNode(t *testing.T) {
 			wantHostinfoExitNodeID: exitNode1.StableID(),
 		},
 	}
-	syspolicy.RegisterWellKnownSettingsForTest(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var pol policytest.Config
 			// Configure policy settings, if any.
-			store := source.NewTestStore(t)
 			if tt.exitNodeIDPolicy != nil {
-				store.SetStrings(source.TestSettingOf(syspolicy.ExitNodeID, string(*tt.exitNodeIDPolicy)))
+				pol.Set(pkey.ExitNodeID, string(*tt.exitNodeIDPolicy))
 			}
 			if tt.exitNodeIPPolicy != nil {
-				store.SetStrings(source.TestSettingOf(syspolicy.ExitNodeIP, tt.exitNodeIPPolicy.String()))
+				pol.Set(pkey.ExitNodeIP, tt.exitNodeIPPolicy.String())
 			}
 			if tt.exitNodeAllowedIDs != nil {
-				store.SetStringLists(source.TestSettingOf(syspolicy.AllowedSuggestedExitNodes, toStrings(tt.exitNodeAllowedIDs)))
+				pol.Set(pkey.AllowedSuggestedExitNodes, toStrings(tt.exitNodeAllowedIDs))
 			}
 			if tt.exitNodeAllowOverride {
-				store.SetBooleans(source.TestSettingOf(syspolicy.AllowExitNodeOverride, true))
-			}
-			if store.IsEmpty() {
-				// No syspolicy settings, so don't register a store.
-				// This allows the test to run in parallel with other tests.
-				t.Parallel()
-			} else {
-				// Register the store for syspolicy settings to make them available to the LocalBackend.
-				syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, store)
+				pol.Set(pkey.AllowExitNodeOverride, true)
 			}
 
 			// Create a new LocalBackend with the given prefs.
 			// Any syspolicy settings will be applied to the initial prefs.
-			lb := newTestLocalBackend(t)
+			sys := tsd.NewSystem()
+			sys.PolicyClient.Set(pol)
+			lb := newTestLocalBackendWithSys(t, sys)
 			lb.SetPrefsForTest(tt.prefs.Clone())
+
 			// Then set the netcheck report and netmap, if any.
 			if tt.report != nil {
 				lb.MagicConn().SetLastNetcheckReportForTest(t.Context(), tt.report)
@@ -2882,20 +2881,16 @@ func TestSetExitNodeIDPolicy(t *testing.T) {
 		},
 	}
 
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			b := newTestBackend(t)
-
-			policyStore := source.NewTestStore(t)
+			var polc policytest.Config
 			if test.exitNodeIDKey {
-				policyStore.SetStrings(source.TestSettingOf(syspolicy.ExitNodeID, test.exitNodeID))
+				polc.Set(pkey.ExitNodeID, test.exitNodeID)
 			}
 			if test.exitNodeIPKey {
-				policyStore.SetStrings(source.TestSettingOf(syspolicy.ExitNodeIP, test.exitNodeIP))
+				polc.Set(pkey.ExitNodeIP, test.exitNodeIP)
 			}
-			syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
+			b := newTestBackend(t, polc)
 
 			if test.nm == nil {
 				test.nm = new(netmap.NetworkMap)
@@ -2903,7 +2898,7 @@ func TestSetExitNodeIDPolicy(t *testing.T) {
 			if test.prefs == nil {
 				test.prefs = ipn.NewPrefs()
 			}
-			pm := must.Get(newProfileManager(new(mem.Store), t.Logf, new(health.Tracker)))
+			pm := must.Get(newProfileManager(new(mem.Store), t.Logf, health.NewTracker(eventbustest.NewBus(t))))
 			pm.prefs = test.prefs.View()
 			b.currentNode().SetNetMap(test.nm)
 			b.pm = pm
@@ -3027,15 +3022,13 @@ func TestUpdateNetmapDeltaAutoExitNode(t *testing.T) {
 		},
 	}
 
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-	policyStore := source.NewTestStoreOf(t, source.TestSettingOf(
-		syspolicy.ExitNodeID, "auto:any",
-	))
-	syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := newTestLocalBackend(t)
+			sys := tsd.NewSystem()
+			sys.PolicyClient.Set(policytest.Config{
+				pkey.ExitNodeID: "auto:any",
+			})
+			b := newTestLocalBackendWithSys(t, sys)
 			b.currentNode().SetNetMap(tt.netmap)
 			b.lastSuggestedExitNode = tt.lastSuggestedExitNode
 			b.sys.MagicSock.Get().SetLastNetcheckReportForTest(b.ctx, tt.report)
@@ -3095,7 +3088,13 @@ func TestUpdateNetmapDeltaAutoExitNode(t *testing.T) {
 }
 
 func TestAutoExitNodeSetNetInfoCallback(t *testing.T) {
-	b := newTestLocalBackend(t)
+	polc := policytest.Config{
+		pkey.ExitNodeID: "auto:any",
+	}
+	sys := tsd.NewSystem()
+	sys.PolicyClient.Set(polc)
+
+	b := newTestLocalBackendWithSys(t, sys)
 	hi := hostinfo.New()
 	ni := tailcfg.NetInfo{LinkType: "wired"}
 	hi.NetInfo = &ni
@@ -3107,16 +3106,12 @@ func TestAutoExitNodeSetNetInfoCallback(t *testing.T) {
 		GetMachinePrivateKey: func() (key.MachinePrivate, error) {
 			return k, nil
 		},
-		Dialer: tsdial.NewDialer(netmon.NewStatic()),
-		Logf:   b.logf,
+		Dialer:       tsdial.NewDialer(netmon.NewStatic()),
+		Logf:         b.logf,
+		PolicyClient: polc,
 	}
 	cc = newClient(t, opts)
 	b.cc = cc
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-	policyStore := source.NewTestStoreOf(t, source.TestSettingOf(
-		syspolicy.ExitNodeID, "auto:any",
-	))
-	syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
 	peer1 := makePeer(1, withCap(26), withDERP(3), withSuggest(), withExitRoutes())
 	peer2 := makePeer(2, withCap(26), withDERP(2), withSuggest(), withExitRoutes())
 	selfNode := tailcfg.Node{
@@ -3220,12 +3215,14 @@ func TestSetControlClientStatusAutoExitNode(t *testing.T) {
 		},
 		DERPMap: derpMap,
 	}
-	b := newTestLocalBackend(t)
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-	policyStore := source.NewTestStoreOf(t, source.TestSettingOf(
-		syspolicy.ExitNodeID, "auto:any",
-	))
-	syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
+
+	polc := policytest.Config{
+		pkey.ExitNodeID: "auto:any",
+	}
+	sys := tsd.NewSystem()
+	sys.PolicyClient.Set(polc)
+
+	b := newTestLocalBackendWithSys(t, sys)
 	b.currentNode().SetNetMap(nm)
 	// Peer 2 should be the initial exit node, as it's better than peer 1
 	// in terms of latency and DERP region.
@@ -3255,7 +3252,7 @@ func TestApplySysPolicy(t *testing.T) {
 		prefs          ipn.Prefs
 		wantPrefs      ipn.Prefs
 		wantAnyChange  bool
-		stringPolicies map[syspolicy.Key]string
+		stringPolicies map[pkey.Key]string
 	}{
 		{
 			name: "empty prefs without policies",
@@ -3290,13 +3287,13 @@ func TestApplySysPolicy(t *testing.T) {
 				RouteAll:               true,
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ControlURL:                "1",
-				syspolicy.EnableIncomingConnections: "never",
-				syspolicy.EnableServerMode:          "always",
-				syspolicy.ExitNodeAllowLANAccess:    "always",
-				syspolicy.EnableTailscaleDNS:        "always",
-				syspolicy.EnableTailscaleSubnets:    "always",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ControlURL:                "1",
+				pkey.EnableIncomingConnections: "never",
+				pkey.EnableServerMode:          "always",
+				pkey.ExitNodeAllowLANAccess:    "always",
+				pkey.EnableTailscaleDNS:        "always",
+				pkey.EnableTailscaleSubnets:    "always",
 			},
 		},
 		{
@@ -3311,13 +3308,13 @@ func TestApplySysPolicy(t *testing.T) {
 				ShieldsUp:   true,
 				ForceDaemon: true,
 			},
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ControlURL:                "1",
-				syspolicy.EnableIncomingConnections: "never",
-				syspolicy.EnableServerMode:          "always",
-				syspolicy.ExitNodeAllowLANAccess:    "never",
-				syspolicy.EnableTailscaleDNS:        "never",
-				syspolicy.EnableTailscaleSubnets:    "never",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ControlURL:                "1",
+				pkey.EnableIncomingConnections: "never",
+				pkey.EnableServerMode:          "always",
+				pkey.ExitNodeAllowLANAccess:    "never",
+				pkey.EnableTailscaleDNS:        "never",
+				pkey.EnableTailscaleSubnets:    "never",
 			},
 		},
 		{
@@ -3339,13 +3336,13 @@ func TestApplySysPolicy(t *testing.T) {
 				RouteAll:               true,
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ControlURL:                "2",
-				syspolicy.EnableIncomingConnections: "always",
-				syspolicy.EnableServerMode:          "never",
-				syspolicy.ExitNodeAllowLANAccess:    "always",
-				syspolicy.EnableTailscaleDNS:        "never",
-				syspolicy.EnableTailscaleSubnets:    "always",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ControlURL:                "2",
+				pkey.EnableIncomingConnections: "always",
+				pkey.EnableServerMode:          "never",
+				pkey.ExitNodeAllowLANAccess:    "always",
+				pkey.EnableTailscaleDNS:        "never",
+				pkey.EnableTailscaleSubnets:    "always",
 			},
 		},
 		{
@@ -3366,12 +3363,12 @@ func TestApplySysPolicy(t *testing.T) {
 				CorpDNS:                true,
 				RouteAll:               true,
 			},
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.EnableIncomingConnections: "user-decides",
-				syspolicy.EnableServerMode:          "user-decides",
-				syspolicy.ExitNodeAllowLANAccess:    "user-decides",
-				syspolicy.EnableTailscaleDNS:        "user-decides",
-				syspolicy.EnableTailscaleSubnets:    "user-decides",
+			stringPolicies: map[pkey.Key]string{
+				pkey.EnableIncomingConnections: "user-decides",
+				pkey.EnableServerMode:          "user-decides",
+				pkey.ExitNodeAllowLANAccess:    "user-decides",
+				pkey.EnableTailscaleDNS:        "user-decides",
+				pkey.EnableTailscaleSubnets:    "user-decides",
 			},
 		},
 		{
@@ -3380,8 +3377,8 @@ func TestApplySysPolicy(t *testing.T) {
 				ControlURL: "set",
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ControlURL: "set",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ControlURL: "set",
 			},
 		},
 		{
@@ -3399,8 +3396,8 @@ func TestApplySysPolicy(t *testing.T) {
 				},
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ApplyUpdates: "always",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ApplyUpdates: "always",
 			},
 		},
 		{
@@ -3418,8 +3415,8 @@ func TestApplySysPolicy(t *testing.T) {
 				},
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.ApplyUpdates: "never",
+			stringPolicies: map[pkey.Key]string{
+				pkey.ApplyUpdates: "never",
 			},
 		},
 		{
@@ -3437,8 +3434,8 @@ func TestApplySysPolicy(t *testing.T) {
 				},
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.CheckUpdates: "always",
+			stringPolicies: map[pkey.Key]string{
+				pkey.CheckUpdates: "always",
 			},
 		},
 		{
@@ -3456,27 +3453,26 @@ func TestApplySysPolicy(t *testing.T) {
 				},
 			},
 			wantAnyChange: true,
-			stringPolicies: map[syspolicy.Key]string{
-				syspolicy.CheckUpdates: "never",
+			stringPolicies: map[pkey.Key]string{
+				pkey.CheckUpdates: "never",
 			},
 		},
 	}
 
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			settings := make([]source.TestSetting[string], 0, len(tt.stringPolicies))
-			for p, v := range tt.stringPolicies {
-				settings = append(settings, source.TestSettingOf(p, v))
+			var polc policytest.Config
+			for k, v := range tt.stringPolicies {
+				polc.Set(k, v)
 			}
-			policyStore := source.NewTestStoreOf(t, settings...)
-			syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
 
 			t.Run("unit", func(t *testing.T) {
 				prefs := tt.prefs.Clone()
 
-				lb := newTestLocalBackend(t)
+				sys := tsd.NewSystem()
+				sys.PolicyClient.Set(polc)
+
+				lb := newTestLocalBackendWithSys(t, sys)
 				gotAnyChange := lb.applySysPolicyLocked(prefs)
 
 				if gotAnyChange && prefs.Equals(&tt.prefs) {
@@ -3506,10 +3502,10 @@ func TestApplySysPolicy(t *testing.T) {
 					wantPrefs.ControlURL = ipn.DefaultControlURL
 				}
 
-				pm := must.Get(newProfileManager(new(mem.Store), t.Logf, new(health.Tracker)))
+				pm := must.Get(newProfileManager(new(mem.Store), t.Logf, health.NewTracker(eventbustest.NewBus(t))))
 				pm.prefs = usePrefs.View()
 
-				b := newTestBackend(t)
+				b := newTestBackend(t, polc)
 				b.mu.Lock()
 				b.pm = pm
 				b.mu.Unlock()
@@ -3608,24 +3604,27 @@ func TestPreferencePolicyInfo(t *testing.T) {
 		},
 	}
 
-	syspolicy.RegisterWellKnownSettingsForTest(t)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, pp := range preferencePolicies {
 				t.Run(string(pp.key), func(t *testing.T) {
-					s := source.TestSetting[string]{
-						Key:   pp.key,
-						Error: tt.policyError,
-						Value: tt.policyValue,
+					t.Parallel()
+
+					var polc policytest.Config
+					if tt.policyError != nil {
+						polc.Set(pp.key, tt.policyError)
+					} else {
+						polc.Set(pp.key, tt.policyValue)
 					}
-					policyStore := source.NewTestStoreOf(t, s)
-					syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
 
 					prefs := defaultPrefs.AsStruct()
 					pp.set(prefs, tt.initialValue)
 
-					lb := newTestLocalBackend(t)
+					bus := eventbustest.NewBus(t)
+					sys := tsd.NewSystemWithBus(bus)
+					sys.PolicyClient.Set(polc)
+
+					lb := newTestLocalBackendWithSys(t, sys)
 					gotAnyChange := lb.applySysPolicyLocked(prefs)
 
 					if gotAnyChange != tt.wantChange {
@@ -4300,7 +4299,7 @@ func (b *LocalBackend) SetPrefsForTest(newp *ipn.Prefs) {
 	}
 	unlock := b.lockAndGetUnlock()
 	defer unlock()
-	b.setPrefsLocked(newp)
+	b.setPrefsLockedOnEntry(newp, unlock)
 }
 
 type peerOptFunc func(*tailcfg.Node)
@@ -5570,15 +5569,13 @@ func TestFillAllowedSuggestions(t *testing.T) {
 			want:        []tailcfg.StableNodeID{"ABC", "def", "gHiJ"},
 		},
 	}
-	syspolicy.RegisterWellKnownSettingsForTest(t)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policyStore := source.NewTestStoreOf(t, source.TestSettingOf(
-				syspolicy.AllowedSuggestedExitNodes, tt.allowPolicy,
-			))
-			syspolicy.MustRegisterStoreForTest(t, "TestStore", setting.DeviceScope, policyStore)
+			var pol policytest.Config
+			pol.Set(pkey.AllowedSuggestedExitNodes, tt.allowPolicy)
 
-			got := fillAllowedSuggestions()
+			got := fillAllowedSuggestions(pol)
 			if got == nil {
 				if tt.want == nil {
 					return
@@ -5791,7 +5788,8 @@ func TestNotificationTargetMatch(t *testing.T) {
 type newTestControlFn func(tb testing.TB, opts controlclient.Options) controlclient.Client
 
 func newLocalBackendWithTestControl(t *testing.T, enableLogging bool, newControl newTestControlFn) *LocalBackend {
-	return newLocalBackendWithSysAndTestControl(t, enableLogging, tsd.NewSystem(), newControl)
+	bus := eventbustest.NewBus(t)
+	return newLocalBackendWithSysAndTestControl(t, enableLogging, tsd.NewSystemWithBus(bus), newControl)
 }
 
 func newLocalBackendWithSysAndTestControl(t *testing.T, enableLogging bool, sys *tsd.System, newControl newTestControlFn) *LocalBackend {
@@ -5805,7 +5803,7 @@ func newLocalBackendWithSysAndTestControl(t *testing.T, enableLogging bool, sys 
 		sys.Set(store)
 	}
 	if _, hasEngine := sys.Engine.GetOK(); !hasEngine {
-		e, err := wgengine.NewFakeUserspaceEngine(logf, sys.Set, sys.HealthTracker(), sys.UserMetricsRegistry(), sys.Bus.Get())
+		e, err := wgengine.NewFakeUserspaceEngine(logf, sys.Set, sys.HealthTracker.Get(), sys.UserMetricsRegistry(), sys.Bus.Get())
 		if err != nil {
 			t.Fatalf("NewFakeUserspaceEngine: %v", err)
 		}
@@ -5818,7 +5816,6 @@ func newLocalBackendWithSysAndTestControl(t *testing.T, enableLogging bool, sys 
 		t.Fatalf("NewLocalBackend: %v", err)
 	}
 	t.Cleanup(b.Shutdown)
-	b.DisablePortMapperForTest()
 
 	b.SetControlClientGetterForTesting(func(opts controlclient.Options) (controlclient.Client, error) {
 		return newControl(t, opts), nil
@@ -5950,7 +5947,6 @@ func (w *notificationWatcher) watch(mask ipn.NotifyWatchOpt, wanted []wantedNoti
 
 			return true
 		})
-
 	}()
 	<-watchAddedCh
 }
@@ -6480,23 +6476,23 @@ func TestUpdatePrefsOnSysPolicyChange(t *testing.T) {
 	}{
 		{
 			name:           "ShieldsUp/True",
-			stringSettings: []source.TestSetting[string]{source.TestSettingOf(syspolicy.EnableIncomingConnections, "never")},
+			stringSettings: []source.TestSetting[string]{source.TestSettingOf(pkey.EnableIncomingConnections, "never")},
 			want:           wantPrefsChanges(fieldChange{"ShieldsUp", true}),
 		},
 		{
 			name:           "ShieldsUp/False",
 			initialPrefs:   &ipn.Prefs{ShieldsUp: true},
-			stringSettings: []source.TestSetting[string]{source.TestSettingOf(syspolicy.EnableIncomingConnections, "always")},
+			stringSettings: []source.TestSetting[string]{source.TestSettingOf(pkey.EnableIncomingConnections, "always")},
 			want:           wantPrefsChanges(fieldChange{"ShieldsUp", false}),
 		},
 		{
 			name:           "ExitNodeID",
-			stringSettings: []source.TestSetting[string]{source.TestSettingOf(syspolicy.ExitNodeID, "foo")},
+			stringSettings: []source.TestSetting[string]{source.TestSettingOf(pkey.ExitNodeID, "foo")},
 			want:           wantPrefsChanges(fieldChange{"ExitNodeID", tailcfg.StableNodeID("foo")}),
 		},
 		{
 			name:           "EnableRunExitNode",
-			stringSettings: []source.TestSetting[string]{source.TestSettingOf(syspolicy.EnableRunExitNode, "always")},
+			stringSettings: []source.TestSetting[string]{source.TestSettingOf(pkey.EnableRunExitNode, "always")},
 			want:           wantPrefsChanges(fieldChange{"AdvertiseRoutes", []netip.Prefix{tsaddr.AllIPv4(), tsaddr.AllIPv6()}}),
 		},
 		{
@@ -6505,9 +6501,9 @@ func TestUpdatePrefsOnSysPolicyChange(t *testing.T) {
 				ExitNodeAllowLANAccess: true,
 			},
 			stringSettings: []source.TestSetting[string]{
-				source.TestSettingOf(syspolicy.EnableServerMode, "always"),
-				source.TestSettingOf(syspolicy.ExitNodeAllowLANAccess, "never"),
-				source.TestSettingOf(syspolicy.ExitNodeIP, "127.0.0.1"),
+				source.TestSettingOf(pkey.EnableServerMode, "always"),
+				source.TestSettingOf(pkey.ExitNodeAllowLANAccess, "never"),
+				source.TestSettingOf(pkey.ExitNodeIP, "127.0.0.1"),
 			},
 			want: wantPrefsChanges(
 				fieldChange{"ForceDaemon", true},
@@ -6523,9 +6519,9 @@ func TestUpdatePrefsOnSysPolicyChange(t *testing.T) {
 				AdvertiseRoutes: []netip.Prefix{tsaddr.AllIPv4(), tsaddr.AllIPv6()},
 			},
 			stringSettings: []source.TestSetting[string]{
-				source.TestSettingOf(syspolicy.EnableTailscaleDNS, "always"),
-				source.TestSettingOf(syspolicy.ExitNodeID, "foo"),
-				source.TestSettingOf(syspolicy.EnableRunExitNode, "always"),
+				source.TestSettingOf(pkey.EnableTailscaleDNS, "always"),
+				source.TestSettingOf(pkey.ExitNodeID, "foo"),
+				source.TestSettingOf(pkey.EnableRunExitNode, "always"),
 			},
 			want: nil, // syspolicy settings match the preferences; no change notification is expected.
 		},
@@ -6533,11 +6529,13 @@ func TestUpdatePrefsOnSysPolicyChange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			syspolicy.RegisterWellKnownSettingsForTest(t)
-			store := source.NewTestStoreOf[string](t)
-			syspolicy.MustRegisterStoreForTest(t, "TestSource", setting.DeviceScope, store)
+			var polc policytest.Config
+			polc.EnableRegisterChangeCallback()
 
-			lb := newLocalBackendWithTestControl(t, enableLogging, func(tb testing.TB, opts controlclient.Options) controlclient.Client {
+			sys := tsd.NewSystem()
+			sys.PolicyClient.Set(polc)
+			lb := newLocalBackendWithSysAndTestControl(t, enableLogging, sys, func(tb testing.TB, opts controlclient.Options) controlclient.Client {
+				opts.PolicyClient = polc
 				return newClient(tb, opts)
 			})
 			if tt.initialPrefs != nil {
@@ -6554,7 +6552,11 @@ func TestUpdatePrefsOnSysPolicyChange(t *testing.T) {
 				nw.watch(0, nil, unexpectedPrefsChange)
 			}
 
-			store.SetStrings(tt.stringSettings...)
+			var batch policytest.Config
+			for _, ss := range tt.stringSettings {
+				batch.Set(ss.Key, ss.Value)
+			}
+			polc.SetMultiple(batch)
 
 			nw.check()
 		})
@@ -7005,6 +7007,19 @@ func TestDisplayMessageIPNBus(t *testing.T) {
 			ipnWatcher.check()
 		})
 	}
+}
+
+func TestDeps(t *testing.T) {
+	deptest.DepChecker{
+		OnImport: func(pkg string) {
+			switch pkg {
+			case "tailscale.com/util/syspolicy",
+				"tailscale.com/util/syspolicy/setting",
+				"tailscale.com/util/syspolicy/rsop":
+				t.Errorf("ipn/ipnlocal: importing syspolicy package %q is not allowed; only policyclient and its deps should be used by ipn/ipnlocal", pkg)
+			}
+		},
+	}.Check(t)
 }
 
 func checkError(tb testing.TB, got, want error, fatal bool) {

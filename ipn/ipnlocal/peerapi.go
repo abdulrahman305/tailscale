@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -26,11 +25,9 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http/httpguts"
-	"tailscale.com/drive"
 	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
-	"tailscale.com/ipn"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/netutil"
@@ -39,12 +36,7 @@ import (
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/views"
 	"tailscale.com/util/clientmetric"
-	"tailscale.com/util/httpm"
 	"tailscale.com/wgengine/filter"
-)
-
-const (
-	taildrivePrefix = "/v0/drive"
 )
 
 var initListenConfig func(*net.ListenConfig, netip.Addr, *netmon.State, string) error
@@ -225,6 +217,7 @@ type peerAPIHandler struct {
 type PeerAPIHandler interface {
 	Peer() tailcfg.NodeView
 	PeerCaps() tailcfg.PeerCapMap
+	CanDebug() bool // can remote node can debug this node (internal state, etc)
 	Self() tailcfg.NodeView
 	LocalBackend() *LocalBackend
 	IsSelfUntagged() bool // whether the peer is untagged and the same as this user
@@ -369,10 +362,6 @@ func (h *peerAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleDNSQuery(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, taildrivePrefix) {
-		h.handleServeDrive(w, r)
-		return
-	}
 	switch r.URL.Path {
 	case "/v0/goroutines":
 		h.handleServeGoroutines(w, r)
@@ -392,15 +381,8 @@ func (h *peerAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v0/interfaces":
 		h.handleServeInterfaces(w, r)
 		return
-	case "/v0/doctor":
-		h.handleServeDoctor(w, r)
-		return
 	case "/v0/sockstats":
 		h.handleServeSockStats(w, r)
-		return
-	case "/v0/ingress":
-		metricIngressCalls.Add(1)
-		h.handleServeIngress(w, r)
 		return
 	}
 	if ph, ok := peerAPIHandlers[r.URL.Path]; ok {
@@ -422,67 +404,6 @@ This is my Tailscale device. Your device is %v.
 	if h.isSelf {
 		fmt.Fprintf(w, "<p>You are the owner of this node.\n")
 	}
-}
-
-func (h *peerAPIHandler) handleServeIngress(w http.ResponseWriter, r *http.Request) {
-	// http.Errors only useful if hitting endpoint manually
-	// otherwise rely on log lines when debugging ingress connections
-	// as connection is hijacked for bidi and is encrypted tls
-	if !h.canIngress() {
-		h.logf("ingress: denied; no ingress cap from %v", h.remoteAddr)
-		http.Error(w, "denied; no ingress cap", http.StatusForbidden)
-		return
-	}
-	logAndError := func(code int, publicMsg string) {
-		h.logf("ingress: bad request from %v: %s", h.remoteAddr, publicMsg)
-		http.Error(w, publicMsg, code)
-	}
-	bad := func(publicMsg string) {
-		logAndError(http.StatusBadRequest, publicMsg)
-	}
-	if r.Method != "POST" {
-		logAndError(http.StatusMethodNotAllowed, "only POST allowed")
-		return
-	}
-	srcAddrStr := r.Header.Get("Tailscale-Ingress-Src")
-	if srcAddrStr == "" {
-		bad("Tailscale-Ingress-Src header not set")
-		return
-	}
-	srcAddr, err := netip.ParseAddrPort(srcAddrStr)
-	if err != nil {
-		bad("Tailscale-Ingress-Src header invalid; want ip:port")
-		return
-	}
-	target := ipn.HostPort(r.Header.Get("Tailscale-Ingress-Target"))
-	if target == "" {
-		bad("Tailscale-Ingress-Target header not set")
-		return
-	}
-	if _, _, err := net.SplitHostPort(string(target)); err != nil {
-		bad("Tailscale-Ingress-Target header invalid; want host:port")
-		return
-	}
-
-	getConnOrReset := func() (net.Conn, bool) {
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			h.logf("ingress: failed hijacking conn")
-			http.Error(w, "failed hijacking conn", http.StatusInternalServerError)
-			return nil, false
-		}
-		io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\n\r\n")
-		return &ipn.FunnelConn{
-			Conn:   conn,
-			Src:    srcAddr,
-			Target: target,
-		}, true
-	}
-	sendRST := func() {
-		http.Error(w, "denied", http.StatusForbidden)
-	}
-
-	h.ps.b.HandleIngressTCPConn(h.peerNode, target, srcAddr, getConnOrReset, sendRST)
 }
 
 func (h *peerAPIHandler) handleServeInterfaces(w http.ResponseWriter, r *http.Request) {
@@ -530,24 +451,6 @@ func (h *peerAPIHandler) handleServeInterfaces(w http.ResponseWriter, r *http.Re
 		fmt.Fprint(w, "</tr>\n")
 	})
 	fmt.Fprintln(w, "</table>")
-}
-
-func (h *peerAPIHandler) handleServeDoctor(w http.ResponseWriter, r *http.Request) {
-	if !h.canDebug() {
-		http.Error(w, "denied; no debug access", http.StatusForbidden)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintln(w, "<h1>Doctor Output</h1>")
-
-	fmt.Fprintln(w, "<pre>")
-
-	h.ps.b.Doctor(r.Context(), func(format string, args ...any) {
-		line := fmt.Sprintf(format, args...)
-		fmt.Fprintln(w, html.EscapeString(line))
-	})
-
-	fmt.Fprintln(w, "</pre>")
 }
 
 func (h *peerAPIHandler) handleServeSockStats(w http.ResponseWriter, r *http.Request) {
@@ -647,6 +550,8 @@ func (h *peerAPIHandler) handleServeSockStats(w http.ResponseWriter, r *http.Req
 	fmt.Fprintln(w, html.EscapeString(sockstats.DebugInfo()))
 	fmt.Fprintln(w, "</pre>")
 }
+
+func (h *peerAPIHandler) CanDebug() bool { return h.canDebug() }
 
 // canDebug reports whether h can debug this node (goroutines, metrics,
 // magicsock internal state, etc).
@@ -1018,90 +923,6 @@ func (rbw *requestBodyWrapper) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (h *peerAPIHandler) handleServeDrive(w http.ResponseWriter, r *http.Request) {
-	h.logfv1("taildrive: got %s request from %s", r.Method, h.peerNode.Key().ShortString())
-	if !h.ps.b.DriveSharingEnabled() {
-		h.logf("taildrive: not enabled")
-		http.Error(w, "taildrive not enabled", http.StatusNotFound)
-		return
-	}
-
-	capsMap := h.PeerCaps()
-	driveCaps, ok := capsMap[tailcfg.PeerCapabilityTaildrive]
-	if !ok {
-		h.logf("taildrive: not permitted")
-		http.Error(w, "taildrive not permitted", http.StatusForbidden)
-		return
-	}
-
-	rawPerms := make([][]byte, 0, len(driveCaps))
-	for _, cap := range driveCaps {
-		rawPerms = append(rawPerms, []byte(cap))
-	}
-
-	p, err := drive.ParsePermissions(rawPerms)
-	if err != nil {
-		h.logf("taildrive: error parsing permissions: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	fs, ok := h.ps.b.sys.DriveForRemote.GetOK()
-	if !ok {
-		h.logf("taildrive: not supported on platform")
-		http.Error(w, "taildrive not supported on platform", http.StatusNotFound)
-		return
-	}
-	wr := &httpResponseWrapper{
-		ResponseWriter: w,
-	}
-	bw := &requestBodyWrapper{
-		ReadCloser: r.Body,
-	}
-	r.Body = bw
-
-	defer func() {
-		switch wr.statusCode {
-		case 304:
-			// 304s are particularly chatty so skip logging.
-		default:
-			log := h.logf
-			if r.Method != httpm.PUT && r.Method != httpm.GET {
-				log = h.logfv1
-			}
-			contentType := "unknown"
-			if ct := wr.Header().Get("Content-Type"); ct != "" {
-				contentType = ct
-			}
-
-			log("taildrive: share: %s from %s to %s: status-code=%d ext=%q content-type=%q tx=%.f rx=%.f", r.Method, h.peerNode.Key().ShortString(), h.selfNode.Key().ShortString(), wr.statusCode, parseDriveFileExtensionForLog(r.URL.Path), contentType, roundTraffic(wr.contentLength), roundTraffic(bw.bytesRead))
-		}
-	}()
-
-	r.URL.Path = strings.TrimPrefix(r.URL.Path, taildrivePrefix)
-	fs.ServeHTTPWithPerms(p, wr, r)
-}
-
-// parseDriveFileExtensionForLog parses the file extension, if available.
-// If a file extension is not present or parsable, the file extension is
-// set to "unknown". If the file extension contains a double quote, it is
-// replaced with "removed".
-// All whitespace is removed from a parsed file extension.
-// File extensions including the leading ., e.g. ".gif".
-func parseDriveFileExtensionForLog(path string) string {
-	fileExt := "unknown"
-	if fe := filepath.Ext(path); fe != "" {
-		if strings.Contains(fe, "\"") {
-			// Do not log include file extensions with quotes within them.
-			return "removed"
-		}
-		// Remove white space from user defined inputs.
-		fileExt = strings.ReplaceAll(fe, " ", "")
-	}
-
-	return fileExt
-}
-
 // peerAPIURL returns an HTTP URL for the peer's peerapi service,
 // without a trailing slash.
 //
@@ -1194,6 +1015,5 @@ var (
 	metricInvalidRequests = clientmetric.NewCounter("peerapi_invalid_requests")
 
 	// Non-debug PeerAPI endpoints.
-	metricDNSCalls     = clientmetric.NewCounter("peerapi_dns")
-	metricIngressCalls = clientmetric.NewCounter("peerapi_ingress")
+	metricDNSCalls = clientmetric.NewCounter("peerapi_dns")
 )

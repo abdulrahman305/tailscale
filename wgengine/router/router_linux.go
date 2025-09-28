@@ -26,6 +26,7 @@ import (
 	"tailscale.com/envknob"
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
+	"tailscale.com/tsconst"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/opt"
 	"tailscale.com/types/preftype"
@@ -49,8 +50,7 @@ type linuxRouter struct {
 	tunname           string
 	netMon            *netmon.Monitor
 	health            *health.Tracker
-	eventClient       *eventbus.Client
-	ruleDeletedSub    *eventbus.Subscriber[netmon.RuleDeleted]
+	eventSubs         eventbus.Monitor
 	rulesAddedPub     *eventbus.Publisher[AddIPRules]
 	unregNetMon       func()
 	addrs             map[netip.Prefix]bool
@@ -100,7 +100,6 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 		tunname:       tunname,
 		netfilterMode: netfilterOff,
 		netMon:        netMon,
-		eventClient:   bus.Client("router-linux"),
 		health:        health,
 
 		cmd: cmd,
@@ -108,9 +107,9 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 		ipRuleFixLimiter: rate.NewLimiter(rate.Every(5*time.Second), 10),
 		ipPolicyPrefBase: 5200,
 	}
-	r.ruleDeletedSub = eventbus.Subscribe[netmon.RuleDeleted](r.eventClient)
-	r.rulesAddedPub = eventbus.Publish[AddIPRules](r.eventClient)
-	go r.consumeEventbusTopics()
+	ec := bus.Client("router-linux")
+	r.rulesAddedPub = eventbus.Publish[AddIPRules](ec)
+	r.eventSubs = ec.Monitor(r.consumeEventbusTopics(ec))
 
 	if r.useIPCommand() {
 		r.ipRuleAvailable = (cmd.run("ip", "rule") == nil)
@@ -158,16 +157,17 @@ func newUserspaceRouterAdvanced(logf logger.Logf, tunname string, netMon *netmon
 // [eventbus.Subscriber]'s and passes them to their related handler. Events are
 // always handled in the order they are received, i.e. the next event is not
 // read until the previous event's handler has returned. It returns when the
-// [portmapper.Mapping] subscriber is closed, which is interpreted to be the
-// same as the [eventbus.Client] closing ([eventbus.Subscribers] are either
-// all open or all closed).
-func (r *linuxRouter) consumeEventbusTopics() {
-	for {
-		select {
-		case <-r.ruleDeletedSub.Done():
-			return
-		case rulesDeleted := <-r.ruleDeletedSub.Events():
-			r.onIPRuleDeleted(rulesDeleted.Table, rulesDeleted.Priority)
+// [eventbus.Client] is closed.
+func (r *linuxRouter) consumeEventbusTopics(ec *eventbus.Client) func(*eventbus.Client) {
+	ruleDeletedSub := eventbus.Subscribe[netmon.RuleDeleted](ec)
+	return func(ec *eventbus.Client) {
+		for {
+			select {
+			case <-ec.Done():
+				return
+			case rs := <-ruleDeletedSub.Events():
+				r.onIPRuleDeleted(rs.Table, rs.Priority)
+			}
 		}
 	}
 }
@@ -364,7 +364,7 @@ func (r *linuxRouter) Close() error {
 	if r.unregNetMon != nil {
 		r.unregNetMon()
 	}
-	r.eventClient.Close()
+	r.eventSubs.Close()
 	if err := r.downInterface(); err != nil {
 		return err
 	}
@@ -1239,14 +1239,14 @@ var baseIPRules = []netlink.Rule{
 	// main routing table.
 	{
 		Priority: 10,
-		Mark:     linuxfw.TailscaleBypassMarkNum,
+		Mark:     tsconst.LinuxBypassMarkNum,
 		Table:    mainRouteTable.Num,
 	},
 	// ...and then we try the 'default' table, for correctness,
 	// even though it's been empty on every Linux system I've ever seen.
 	{
 		Priority: 30,
-		Mark:     linuxfw.TailscaleBypassMarkNum,
+		Mark:     tsconst.LinuxBypassMarkNum,
 		Table:    defaultRouteTable.Num,
 	},
 	// If neither of those matched (no default route on this system?)
@@ -1254,7 +1254,7 @@ var baseIPRules = []netlink.Rule{
 	// to the tailscale routes, because that would create routing loops.
 	{
 		Priority: 50,
-		Mark:     linuxfw.TailscaleBypassMarkNum,
+		Mark:     tsconst.LinuxBypassMarkNum,
 		Type:     unix.RTN_UNREACHABLE,
 	},
 	// If we get to this point, capture all packets and send them
@@ -1284,7 +1284,7 @@ var ubntIPRules = []netlink.Rule{
 	{
 		Priority: 70,
 		Invert:   true,
-		Mark:     linuxfw.TailscaleBypassMarkNum,
+		Mark:     tsconst.LinuxBypassMarkNum,
 		Table:    tailscaleRouteTable.Num,
 	},
 }
@@ -1312,7 +1312,7 @@ func (r *linuxRouter) justAddIPRules() error {
 			// Note: r is a value type here; safe to mutate it.
 			ru.Family = family.netlinkInt()
 			if ru.Mark != 0 {
-				ru.Mask = linuxfw.TailscaleFwmarkMaskNum
+				ru.Mask = tsconst.LinuxFwmarkMaskNum
 			}
 			ru.Goto = -1
 			ru.SuppressIfgroup = -1
@@ -1345,7 +1345,7 @@ func (r *linuxRouter) addIPRulesWithIPCommand() error {
 			}
 			if rule.Mark != 0 {
 				if r.fwmaskWorks() {
-					args = append(args, "fwmark", fmt.Sprintf("0x%x/%s", rule.Mark, linuxfw.TailscaleFwmarkMask))
+					args = append(args, "fwmark", fmt.Sprintf("0x%x/%s", rule.Mark, tsconst.LinuxFwmarkMask))
 				} else {
 					args = append(args, "fwmark", fmt.Sprintf("0x%x", rule.Mark))
 				}

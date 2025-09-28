@@ -1,6 +1,8 @@
 // Copyright (c) Tailscale Inc & AUTHORS
 // SPDX-License-Identifier: BSD-3-Clause
 
+//go:build !ts_omit_serve
+
 package ipnlocal
 
 import (
@@ -33,8 +35,10 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/netmap"
+	"tailscale.com/util/eventbus/eventbustest"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/must"
+	"tailscale.com/util/syspolicy/policyclient"
 	"tailscale.com/wgengine"
 )
 
@@ -239,11 +243,15 @@ func TestServeConfigForeground(t *testing.T) {
 
 	err := b.SetServeConfig(&ipn.ServeConfig{
 		Foreground: map[string]*ipn.ServeConfig{
-			session1: {TCP: map[uint16]*ipn.TCPPortHandler{
-				443: {TCPForward: "http://localhost:3000"}},
+			session1: {
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					443: {TCPForward: "http://localhost:3000"},
+				},
 			},
-			session2: {TCP: map[uint16]*ipn.TCPPortHandler{
-				999: {TCPForward: "http://localhost:4000"}},
+			session2: {
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					999: {TCPForward: "http://localhost:4000"},
+				},
 			},
 		},
 	}, "")
@@ -266,8 +274,10 @@ func TestServeConfigForeground(t *testing.T) {
 			5000: {TCPForward: "http://localhost:5000"},
 		},
 		Foreground: map[string]*ipn.ServeConfig{
-			session2: {TCP: map[uint16]*ipn.TCPPortHandler{
-				999: {TCPForward: "http://localhost:4000"}},
+			session2: {
+				TCP: map[uint16]*ipn.TCPPortHandler{
+					999: {TCPForward: "http://localhost:4000"},
+				},
 			},
 		},
 	}, "")
@@ -490,7 +500,6 @@ func TestServeConfigServices(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestServeConfigETag(t *testing.T) {
@@ -658,6 +667,7 @@ func TestServeHTTPProxyPath(t *testing.T) {
 		})
 	}
 }
+
 func TestServeHTTPProxyHeaders(t *testing.T) {
 	b := newTestBackend(t)
 
@@ -858,7 +868,6 @@ func Test_reverseProxyConfiguration(t *testing.T) {
 			wantsURL:      mustCreateURL(t, "https://example3.com"),
 		},
 	})
-
 }
 
 func mustCreateURL(t *testing.T, u string) url.URL {
@@ -870,17 +879,28 @@ func mustCreateURL(t *testing.T, u string) url.URL {
 	return *uParsed
 }
 
-func newTestBackend(t *testing.T) *LocalBackend {
+func newTestBackend(t *testing.T, opts ...any) *LocalBackend {
 	var logf logger.Logf = logger.Discard
 	const debug = true
 	if debug {
 		logf = logger.WithPrefix(tstest.WhileTestRunningLogger(t), "... ")
 	}
 
-	sys := tsd.NewSystem()
+	bus := eventbustest.NewBus(t)
+	sys := tsd.NewSystemWithBus(bus)
+
+	for _, o := range opts {
+		switch v := o.(type) {
+		case policyclient.Client:
+			sys.PolicyClient.Set(v)
+		default:
+			panic(fmt.Sprintf("unsupported option type %T", v))
+		}
+	}
+
 	e, err := wgengine.NewUserspaceEngine(logf, wgengine.Config{
 		SetSubsystem:  sys.Set,
-		HealthTracker: sys.HealthTracker(),
+		HealthTracker: sys.HealthTracker.Get(),
 		Metrics:       sys.UserMetricsRegistry(),
 		EventBus:      sys.Bus.Get(),
 	})
@@ -898,7 +918,7 @@ func newTestBackend(t *testing.T) *LocalBackend {
 	dir := t.TempDir()
 	b.SetVarRoot(dir)
 
-	pm := must.Get(newProfileManager(new(mem.Store), logf, new(health.Tracker)))
+	pm := must.Get(newProfileManager(new(mem.Store), logf, health.NewTracker(bus)))
 	pm.currentProfile = (&ipn.LoginProfile{ID: "id0"}).View()
 	b.pm = pm
 
@@ -941,13 +961,13 @@ func newTestBackend(t *testing.T) *LocalBackend {
 func TestServeFileOrDirectory(t *testing.T) {
 	td := t.TempDir()
 	writeFile := func(suffix, contents string) {
-		if err := os.WriteFile(filepath.Join(td, suffix), []byte(contents), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(td, suffix), []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeFile("foo", "this is foo")
 	writeFile("bar", "this is bar")
-	os.MkdirAll(filepath.Join(td, "subdir"), 0700)
+	os.MkdirAll(filepath.Join(td, "subdir"), 0o700)
 	writeFile("subdir/file-a", "this is A")
 	writeFile("subdir/file-b", "this is B")
 	writeFile("subdir/file-c", "this is C")

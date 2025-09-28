@@ -168,6 +168,7 @@ func (nb *nodeBackend) NetworkProfile() ipn.NetworkProfile {
 		// These are ok to call with nil netMap.
 		MagicDNSName: nb.netMap.MagicDNSSuffix(),
 		DomainName:   nb.netMap.DomainName(),
+		DisplayName:  nb.netMap.TailnetDisplayName(),
 	}
 }
 
@@ -255,6 +256,12 @@ func (nb *nodeBackend) PeersForTest() []tailcfg.NodeView {
 		return cmp.Compare(a.ID(), b.ID())
 	})
 	return ret
+}
+
+func (nb *nodeBackend) CollectServices() bool {
+	nb.mu.Lock()
+	defer nb.mu.Unlock()
+	return nb.netMap != nil && nb.netMap.CollectServices
 }
 
 // AppendMatchingPeers returns base with all peers that match pred appended.

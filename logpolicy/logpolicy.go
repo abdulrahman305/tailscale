@@ -51,7 +51,8 @@ import (
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/must"
 	"tailscale.com/util/racebuild"
-	"tailscale.com/util/syspolicy"
+	"tailscale.com/util/syspolicy/pkey"
+	"tailscale.com/util/syspolicy/policyclient"
 	"tailscale.com/util/testenv"
 	"tailscale.com/version"
 	"tailscale.com/version/distro"
@@ -65,7 +66,7 @@ var getLogTargetOnce struct {
 func getLogTarget() string {
 	getLogTargetOnce.Do(func() {
 		envTarget, _ := os.LookupEnv("TS_LOG_TARGET")
-		getLogTargetOnce.v, _ = syspolicy.GetString(syspolicy.LogTarget, envTarget)
+		getLogTargetOnce.v, _ = policyclient.Get().GetString(pkey.LogTarget, envTarget)
 	})
 
 	return getLogTargetOnce.v
@@ -457,18 +458,6 @@ func tryFixLogStateLocation(dir, cmdname string, logf logger.Logf) {
 func New(collection string, netMon *netmon.Monitor, health *health.Tracker, logf logger.Logf) *Policy {
 	return Options{
 		Collection: collection,
-		NetMon:     netMon,
-		Health:     health,
-		Logf:       logf,
-	}.New()
-}
-
-// Deprecated: Use [Options.New] instead.
-func NewWithConfigPath(collection, dir, cmdName string, netMon *netmon.Monitor, health *health.Tracker, logf logger.Logf) *Policy {
-	return Options{
-		Collection: collection,
-		Dir:        dir,
-		CmdName:    cmdName,
 		NetMon:     netMon,
 		Health:     health,
 		Logf:       logf,
@@ -867,7 +856,7 @@ type TransportOptions struct {
 // New returns an HTTP Transport particularly suited to uploading logs
 // to the given host name. See [DialContext] for details on how it works.
 func (opts TransportOptions) New() http.RoundTripper {
-	if testenv.InTest() {
+	if testenv.InTest() || envknob.NoLogsNoSupport() {
 		return noopPretendSuccessTransport{}
 	}
 	if opts.NetMon == nil {

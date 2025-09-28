@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"tailscale.com/ipn/store"
 	"tailscale.com/paths"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
 
@@ -39,6 +41,12 @@ func init() {
 		hi.TPM = infoOnce()
 	})
 	store.Register(store.TPMPrefix, newStore)
+	if runtime.GOOS == "linux" || runtime.GOOS == "windows" {
+		key.RegisterHardwareAttestationKeyFns(
+			func() key.HardwareAttestationKey { return &attestationKey{} },
+			func() (key.HardwareAttestationKey, error) { return newAttestationKey() },
+		)
+	}
 }
 
 func info() *tailcfg.TPMInfo {
