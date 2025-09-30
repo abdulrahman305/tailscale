@@ -25,9 +25,11 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"tailscale.com/appc"
 	"tailscale.com/client/tailscale/apitype"
-	"tailscale.com/clientupdate"
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/health/healthmsg"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn"
@@ -72,6 +74,7 @@ var handler = map[string]LocalAPIHandler{
 	// The other /localapi/v0/NAME handlers are exact matches and contain only NAME
 	// without a trailing slash:
 	"alpha-set-device-attrs":       (*Handler).serveSetDeviceAttrs, // see tailscale/corp#24690
+	"appc-route-info":              (*Handler).serveGetAppcRouteInfo,
 	"bugreport":                    (*Handler).serveBugReport,
 	"check-ip-forwarding":          (*Handler).serveCheckIPForwarding,
 	"check-prefs":                  (*Handler).serveCheckPrefs,
@@ -117,8 +120,6 @@ var handler = map[string]LocalAPIHandler{
 	"status":                       (*Handler).serveStatus,
 	"suggest-exit-node":            (*Handler).serveSuggestExitNode,
 	"update/check":                 (*Handler).serveUpdateCheck,
-	"update/install":               (*Handler).serveUpdateInstall,
-	"update/progress":              (*Handler).serveUpdateProgress,
 	"upload-client-metrics":        (*Handler).serveUploadClientMetrics,
 	"usermetrics":                  (*Handler).serveUserMetrics,
 	"watch-ipn-bus":                (*Handler).serveWatchIPNBus,
@@ -574,6 +575,15 @@ func (h *Handler) serveGoroutines(w http.ResponseWriter, r *http.Request) {
 // it to the client.
 func (h *Handler) serveLogTap(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if !buildfeatures.HasLogTail {
+		// TODO(bradfitz): separate out logtail tap functionality from upload
+		// functionality to make this possible? But seems unlikely people would
+		// want just this. They could "tail -f" or "journalctl -f" their logs
+		// themselves.
+		http.Error(w, "logtap not supported in this build", http.StatusNotImplemented)
+		return
+	}
 
 	// Require write access (~root) as the logs could contain something
 	// sensitive.
@@ -1885,7 +1895,7 @@ func (h *Handler) serveUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !clientupdate.CanAutoUpdate() {
+	if !feature.CanAutoUpdate() {
 		// if we don't support auto-update, just say that we're up to date
 		json.NewEncoder(w).Encode(tailcfg.ClientVersion{RunningLatest: true})
 		return
@@ -1901,37 +1911,6 @@ func (h *Handler) serveUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(cv)
-}
-
-// serveUpdateInstall sends a request to the LocalBackend to start a Tailscale
-// self-update. A successful response does not indicate whether the update
-// succeeded, only that the request was accepted. Clients should use
-// serveUpdateProgress after pinging this endpoint to check how the update is
-// going.
-func (h *Handler) serveUpdateInstall(w http.ResponseWriter, r *http.Request) {
-	if r.Method != httpm.POST {
-		http.Error(w, "only POST allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.WriteHeader(http.StatusAccepted)
-
-	go h.b.DoSelfUpdate()
-}
-
-// serveUpdateProgress returns the status of an in-progress Tailscale self-update.
-// This is provided as a slice of ipnstate.UpdateProgress structs with various
-// log messages in order from oldest to newest. If an update is not in progress,
-// the returned slice will be empty.
-func (h *Handler) serveUpdateProgress(w http.ResponseWriter, r *http.Request) {
-	if r.Method != httpm.GET {
-		http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	ups := h.b.GetSelfUpdateProgress()
-
-	json.NewEncoder(w).Encode(ups)
 }
 
 // serveDNSOSConfig serves the current system DNS configuration as a JSON object, if
@@ -2100,4 +2079,22 @@ func (h *Handler) serveShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eventbus.Publish[Shutdown](ec).Publish(Shutdown{})
+}
+
+func (h *Handler) serveGetAppcRouteInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != httpm.GET {
+		http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	res, err := h.b.ReadRouteInfo()
+	if err != nil {
+		if errors.Is(err, ipn.ErrStateNotExist) {
+			res = &appc.RouteInfo{}
+		} else {
+			WriteErrorJSON(w, err)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(res)
 }

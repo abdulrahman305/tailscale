@@ -96,6 +96,8 @@ var Features = map[FeatureTag]FeatureMeta{
 	"captiveportal": {"CaptivePortal", "Captive portal detection", nil},
 	"capture":       {"Capture", "Packet capture", nil},
 	"cli":           {"CLI", "embed the CLI into the tailscaled binary", nil},
+	"cliconndiag":   {"CLIConnDiag", "CLI connection error diagnostics", nil},
+	"clientupdate":  {"ClientUpdate", "Client auto-update support", nil},
 	"completion":    {"Completion", "CLI shell completion", nil},
 	"dbus":          {"DBus", "Linux DBus support", nil},
 	"debugeventbus": {"DebugEventBus", "eventbus debug support", nil},
@@ -115,15 +117,35 @@ var Features = map[FeatureTag]FeatureMeta{
 	"iptables":      {"IPTables", "Linux iptables support", nil},
 	"kube":          {"Kube", "Kubernetes integration", nil},
 	"linuxdnsfight": {"LinuxDNSFight", "Linux support for detecting DNS fights (inotify watching of /etc/resolv.conf)", nil},
-	"oauthkey":      {"OAuthKey", "OAuth secret-to-authkey resolution support", nil},
+	"logtail": {
+		Sym:  "LogTail",
+		Desc: "upload logs to log.tailscale.com (debug logs for bug reports and also by network flow logs if enabled)",
+	},
+	"oauthkey": {"OAuthKey", "OAuth secret-to-authkey resolution support", nil},
 	"outboundproxy": {
 		Sym:  "OutboundProxy",
 		Desc: "Outbound localhost HTTP/SOCK5 proxy support",
 		Deps: []FeatureTag{"netstack"},
 	},
+	"osrouter": {
+		Sym:  "OSRouter",
+		Desc: "Configure the operating system's network stack, IPs, and routing tables",
+		// TODO(bradfitz): if this is omitted, and netstack is too, then tailscaled needs
+		// external config to be useful. Some people may want that, and we should support it,
+		// but it's rare. Maybe there should be a way to declare here that this "Provides"
+		// another feature (and netstack can too), and then if those required features provided
+		// by some other feature are missing, then it's an error by default unless you accept
+		// that it's okay to proceed without that meta feature.
+	},
 	"portlist":   {"PortList", "Optionally advertise listening service ports", nil},
 	"portmapper": {"PortMapper", "NAT-PMP/PCP/UPnP port mapping support", nil},
-	"netstack":   {"Netstack", "gVisor netstack (userspace networking) support", nil},
+	"posture":    {"Posture", "Device posture checking support", nil},
+	"netlog": {
+		Sym:  "NetLog",
+		Desc: "Network flow logging support",
+		Deps: []FeatureTag{"logtail"},
+	},
+	"netstack": {"Netstack", "gVisor netstack (userspace networking) support", nil},
 	"networkmanager": {
 		Sym:  "NetworkManager",
 		Desc: "Linux NetworkManager integration",
@@ -134,6 +156,10 @@ var Features = map[FeatureTag]FeatureMeta{
 		Sym:  "Resolved",
 		Desc: "Linux systemd-resolved integration",
 		Deps: []FeatureTag{"dbus"},
+	},
+	"sdnotify": {
+		Sym:  "SDNotify",
+		Desc: "systemd notification support",
 	},
 	"serve": {
 		Sym:  "Serve",

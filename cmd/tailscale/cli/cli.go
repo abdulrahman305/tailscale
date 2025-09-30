@@ -26,6 +26,7 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/cmd/tailscale/cli/ffcomplete"
 	"tailscale.com/envknob"
+	"tailscale.com/feature"
 	"tailscale.com/paths"
 	"tailscale.com/util/slicesx"
 	"tailscale.com/version/distro"
@@ -275,6 +276,7 @@ change in the future.
 			idTokenCmd,
 			configureHostCmd(),
 			systrayCmd,
+			appcRoutesCmd,
 		),
 		FlagSet: rootfs,
 		Exec: func(ctx context.Context, args []string) error {
@@ -554,4 +556,13 @@ func lastSeenFmt(t time.Time) string {
 	default:
 		return fmt.Sprintf(", last seen %dd ago", int(d.Hours()/24))
 	}
+}
+
+var hookFixTailscaledConnectError feature.Hook[func(error) error] // for cliconndiag
+
+func fixTailscaledConnectError(origErr error) error {
+	if f, ok := hookFixTailscaledConnectError.GetOk(); ok {
+		return f(origErr)
+	}
+	return origErr
 }
