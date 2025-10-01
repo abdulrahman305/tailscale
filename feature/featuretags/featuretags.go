@@ -88,6 +88,7 @@ type FeatureMeta struct {
 // excluded via build tags, and a description of each.
 var Features = map[FeatureTag]FeatureMeta{
 	"acme":          {"ACME", "ACME TLS certificate management", nil},
+	"appconnectors": {"AppConnectors", "App Connectors support", nil},
 	"aws":           {"AWS", "AWS integration", nil},
 	"bird":          {"Bird", "Bird BGP integration", nil},
 	"captiveportal": {"CaptivePortal", "Captive portal detection", nil},
@@ -97,6 +98,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"clientupdate":  {"ClientUpdate", "Client auto-update support", nil},
 	"completion":    {"Completion", "CLI shell completion", nil},
 	"dbus":          {"DBus", "Linux DBus support", nil},
+	"debug":         {"Debug", "various debug support, for things that don't have or need their own more specific feature", nil},
 	"debugeventbus": {"DebugEventBus", "eventbus debug support", nil},
 	"debugportmapper": {
 		Sym:  "DebugPortMapper",
@@ -111,6 +113,7 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc: "Generic Receive Offload support (performance)",
 		Deps: []FeatureTag{"netstack"},
 	},
+	"hujsonconf":    {"HuJSONConf", "HuJSON config file support", nil},
 	"iptables":      {"IPTables", "Linux iptables support", nil},
 	"kube":          {"Kube", "Kubernetes integration", nil},
 	"linuxdnsfight": {"LinuxDNSFight", "Linux support for detecting DNS fights (inotify watching of /etc/resolv.conf)", nil},
@@ -121,7 +124,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"oauthkey": {"OAuthKey", "OAuth secret-to-authkey resolution support", nil},
 	"outboundproxy": {
 		Sym:  "OutboundProxy",
-		Desc: "Outbound localhost HTTP/SOCK5 proxy support",
+		Desc: "Support running an outbound localhost HTTP/SOCK5 proxy support that sends traffic over Tailscale",
 		Deps: []FeatureTag{"netstack"},
 	},
 	"osrouter": {
@@ -137,6 +140,10 @@ var Features = map[FeatureTag]FeatureMeta{
 	"portlist":   {"PortList", "Optionally advertise listening service ports", nil},
 	"portmapper": {"PortMapper", "NAT-PMP/PCP/UPnP port mapping support", nil},
 	"posture":    {"Posture", "Device posture checking support", nil},
+	"dns": {
+		Sym:  "DNS",
+		Desc: "MagicDNS and system DNS configuration support",
+	},
 	"netlog": {
 		Sym:  "NetLog",
 		Desc: "Network flow logging support",
@@ -168,6 +175,10 @@ var Features = map[FeatureTag]FeatureMeta{
 		Desc: "Tailscale SSH support",
 		Deps: []FeatureTag{"dbus", "netstack"},
 	},
+	"synology": {
+		Sym:  "Synology",
+		Desc: "Synology NAS integration (applies to Linux builds only)",
+	},
 	"syspolicy": {"SystemPolicy", "System policy configuration (MDM) support", nil},
 	"systray": {
 		Sym:  "SysTray",
@@ -178,7 +189,11 @@ var Features = map[FeatureTag]FeatureMeta{
 	"tailnetlock": {"TailnetLock", "Tailnet Lock support", nil},
 	"tap":         {"Tap", "Experimental Layer 2 (ethernet) support", nil},
 	"tpm":         {"TPM", "TPM support", nil},
-	"wakeonlan":   {"WakeOnLAN", "Wake-on-LAN support", nil},
+	"useproxy": {
+		Sym:  "UseProxy",
+		Desc: "Support using system proxies as specified by env vars or the system configuration to reach Tailscale servers.",
+	},
+	"wakeonlan": {"WakeOnLAN", "Wake-on-LAN support", nil},
 	"webclient": {
 		Sym: "WebClient", Desc: "Web client support",
 		Deps: []FeatureTag{"serve"},

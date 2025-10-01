@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"tailscale.com/control/controlclient"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/ipn"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/tailcfg"
@@ -48,9 +50,6 @@ var c2nHandlers = map[methodAndPath]c2nHandler{
 
 	// SSH
 	req("/ssh/usernames"): handleC2NSSHUsernames,
-
-	// App Connectors.
-	req("GET /appconnector/routes"): handleC2NAppConnectorDomainRoutesGet,
 
 	// Linux netfilter.
 	req("POST /netfilter-kind"): handleC2NSetNetfilterKind,
@@ -130,6 +129,10 @@ func handleC2NLogtailFlush(b *LocalBackend, w http.ResponseWriter, r *http.Reque
 }
 
 func handleC2NDebugNetMap(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasDebug {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	ctx := r.Context()
 	if r.Method != httpm.POST && r.Method != httpm.GET {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -190,20 +193,36 @@ func handleC2NDebugNetMap(b *LocalBackend, w http.ResponseWriter, r *http.Reques
 }
 
 func handleC2NDebugGoroutines(_ *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasDebug {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(goroutines.ScrubbedGoroutineDump(true))
 }
 
 func handleC2NDebugPrefs(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasDebug {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	writeJSON(w, b.Prefs())
 }
 
 func handleC2NDebugMetrics(_ *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasDebug {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain")
 	clientmetric.WritePrometheusExpositionFormat(w)
 }
 
 func handleC2NDebugComponentLogging(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasDebug {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	component := r.FormValue("component")
 	secs, _ := strconv.Atoi(r.FormValue("secs"))
 	if secs == 0 {
@@ -270,27 +289,6 @@ func handleC2NSockStats(b *LocalBackend, w http.ResponseWriter, r *http.Request)
 	b.sockstatLogger.Flush()
 	fmt.Fprintf(w, "logid: %s\n", b.sockstatLogger.LogID())
 	fmt.Fprintf(w, "debug info: %v\n", sockstats.DebugInfo())
-}
-
-// handleC2NAppConnectorDomainRoutesGet handles returning the domains
-// that the app connector is responsible for, as well as the resolved
-// IP addresses for each domain. If the node is not configured as
-// an app connector, an empty map is returned.
-func handleC2NAppConnectorDomainRoutesGet(b *LocalBackend, w http.ResponseWriter, r *http.Request) {
-	b.logf("c2n: GET /appconnector/routes received")
-
-	var res tailcfg.C2NAppConnectorDomainRoutesResponse
-	appConnector := b.AppConnector()
-	if appConnector == nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(res)
-		return
-	}
-
-	res.Domains = appConnector.DomainRoutes()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(res)
 }
 
 func handleC2NSetNetfilterKind(b *LocalBackend, w http.ResponseWriter, r *http.Request) {

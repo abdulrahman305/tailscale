@@ -30,6 +30,7 @@ import (
 	"tailscale.com/control/controlknobs"
 	"tailscale.com/envknob"
 	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/health"
 	"tailscale.com/hostinfo"
 	"tailscale.com/ipn/ipnstate"
@@ -41,7 +42,6 @@ import (
 	"tailscale.com/net/netx"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tsdial"
-	"tailscale.com/net/tshttpproxy"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tempfork/httprec"
 	"tailscale.com/tka"
@@ -274,8 +274,12 @@ func NewDirect(opts Options) (*Direct, error) {
 	var interceptedDial *atomic.Bool
 	if httpc == nil {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
-		tr.Proxy = tshttpproxy.ProxyFromEnvironment
-		tshttpproxy.SetTransportGetProxyConnectHeader(tr)
+		if buildfeatures.HasUseProxy {
+			tr.Proxy = feature.HookProxyFromEnvironment.GetOrNil()
+			if f, ok := feature.HookProxySetTransportGetProxyConnectHeader.GetOk(); ok {
+				f(tr)
+			}
+		}
 		tr.TLSClientConfig = tlsdial.Config(opts.HealthTracker, tr.TLSClientConfig)
 		var dialFunc netx.DialFunc
 		dialFunc, interceptedDial = makeScreenTimeDetectingDialFunc(opts.Dialer.SystemDial)
@@ -1189,7 +1193,7 @@ func (c *Direct) handleDebugMessage(ctx context.Context, debug *tailcfg.Debug) e
 		c.logf("exiting process with status %v per controlplane", *code)
 		os.Exit(*code)
 	}
-	if debug.DisableLogTail {
+	if buildfeatures.HasLogTail && debug.DisableLogTail {
 		logtail.Disable()
 		envknob.SetNoLogsNoSupport()
 	}
@@ -1580,6 +1584,9 @@ func (c *Direct) setDNSNoise(ctx context.Context, req *tailcfg.SetDNSRequest) er
 // SetDNS sends the SetDNSRequest request to the control plane server,
 // requesting a DNS record be created or updated.
 func (c *Direct) SetDNS(ctx context.Context, req *tailcfg.SetDNSRequest) (err error) {
+	if !buildfeatures.HasACME {
+		return feature.ErrUnavailable
+	}
 	metricSetDNS.Add(1)
 	defer func() {
 		if err != nil {
