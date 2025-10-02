@@ -31,10 +31,10 @@ import (
 	"golang.org/x/net/http2"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/control/controlhttp"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/feature"
 	_ "tailscale.com/feature/condregister/useproxy"
 	"tailscale.com/hostinfo"
-	"tailscale.com/internal/noiseconn"
 	"tailscale.com/ipn"
 	"tailscale.com/net/ace"
 	"tailscale.com/net/netmon"
@@ -1122,20 +1122,11 @@ func tryConnect(ctx context.Context, controlPublic key.MachinePublic, noiseDiale
 	}
 
 	// Now, create a Noise conn over the existing conn.
-	nc, err := noiseconn.New(conn.Conn, h2Transport, 0, nil)
+	nc, err := ts2021.New(conn.Conn, h2Transport, 0, nil)
 	if err != nil {
 		return fmt.Errorf("noiseconn.New: %w", err)
 	}
 	defer nc.Close()
-
-	// Reserve a RoundTrip for the whoami request.
-	ok, _, err := nc.ReserveNewRequest(ctx)
-	if err != nil {
-		return fmt.Errorf("ReserveNewRequest: %w", err)
-	}
-	if !ok {
-		return errors.New("ReserveNewRequest failed")
-	}
 
 	// Make a /whoami request to the server to verify that we can actually
 	// communicate over the newly-established connection.

@@ -18,8 +18,8 @@ import (
 
 	"golang.org/x/net/http2"
 	"tailscale.com/control/controlhttp"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/health"
-	"tailscale.com/internal/noiseconn"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsdial"
@@ -28,7 +28,6 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/mak"
-	"tailscale.com/util/multierr"
 	"tailscale.com/util/singleflight"
 )
 
@@ -51,7 +50,7 @@ type NoiseClient struct {
 
 	// sfDial ensures that two concurrent requests for a noise connection only
 	// produce one shared one between the two callers.
-	sfDial singleflight.Group[struct{}, *noiseconn.Conn]
+	sfDial singleflight.Group[struct{}, *ts2021.Conn]
 
 	dialer       *tsdial.Dialer
 	dnsCache     *dnscache.Resolver
@@ -73,9 +72,9 @@ type NoiseClient struct {
 	// mu only protects the following variables.
 	mu       sync.Mutex
 	closed   bool
-	last     *noiseconn.Conn // or nil
+	last     *ts2021.Conn // or nil
 	nextID   int
-	connPool map[int]*noiseconn.Conn // active connections not yet closed; see noiseconn.Conn.Close
+	connPool map[int]*ts2021.Conn // active connections not yet closed; see ts2021.Conn.Close
 }
 
 // NoiseOpts contains options for the NewNoiseClient function. All fields are
@@ -182,29 +181,6 @@ func NewNoiseClient(opts NoiseOpts) (*NoiseClient, error) {
 	return np, nil
 }
 
-// GetSingleUseRoundTripper returns a RoundTripper that can be only be used once
-// (and must be used once) to make a single HTTP request over the noise channel
-// to the coordination server.
-//
-// In addition to the RoundTripper, it returns the HTTP/2 channel's early noise
-// payload, if any.
-func (nc *NoiseClient) GetSingleUseRoundTripper(ctx context.Context) (http.RoundTripper, *tailcfg.EarlyNoise, error) {
-	for tries := 0; tries < 3; tries++ {
-		conn, err := nc.getConn(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		ok, earlyPayloadMaybeNil, err := conn.ReserveNewRequest(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		if ok {
-			return conn, earlyPayloadMaybeNil, nil
-		}
-	}
-	return nil, nil, errors.New("[unexpected] failed to reserve a request on a connection")
-}
-
 // contextErr is an error that wraps another error and is used to indicate that
 // the error was because a context expired.
 type contextErr struct {
@@ -219,12 +195,12 @@ func (e contextErr) Unwrap() error {
 	return e.err
 }
 
-// getConn returns a noiseconn.Conn that can be used to make requests to the
+// getConn returns a ts2021.Conn that can be used to make requests to the
 // coordination server. It may return a cached connection or create a new one.
 // Dials are singleflighted, so concurrent calls to getConn may only dial once.
 // As such, context values may not be respected as there are no guarantees that
 // the context passed to getConn is the same as the context passed to dial.
-func (nc *NoiseClient) getConn(ctx context.Context) (*noiseconn.Conn, error) {
+func (nc *NoiseClient) getConn(ctx context.Context) (*ts2021.Conn, error) {
 	nc.mu.Lock()
 	if last := nc.last; last != nil && last.CanTakeNewRequest() {
 		nc.mu.Unlock()
@@ -238,7 +214,7 @@ func (nc *NoiseClient) getConn(ctx context.Context) (*noiseconn.Conn, error) {
 		// canceled. Instead, we have to additionally check that the context
 		// which was canceled is our context and retry if our context is still
 		// valid.
-		conn, err, _ := nc.sfDial.Do(struct{}{}, func() (*noiseconn.Conn, error) {
+		conn, err, _ := nc.sfDial.Do(struct{}{}, func() (*ts2021.Conn, error) {
 			c, err := nc.dial(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -295,18 +271,18 @@ func (nc *NoiseClient) Close() error {
 	nc.connPool = nil
 	nc.mu.Unlock()
 
-	var errors []error
+	var errs []error
 	for _, c := range conns {
 		if err := c.Close(); err != nil {
-			errors = append(errors, err)
+			errs = append(errs, err)
 		}
 	}
-	return multierr.New(errors...)
+	return errors.Join(errs...)
 }
 
 // dial opens a new connection to tailcontrol, fetching the server noise key
 // if not cached.
-func (nc *NoiseClient) dial(ctx context.Context) (*noiseconn.Conn, error) {
+func (nc *NoiseClient) dial(ctx context.Context) (*ts2021.Conn, error) {
 	nc.mu.Lock()
 	connID := nc.nextID
 	nc.nextID++
@@ -376,7 +352,7 @@ func (nc *NoiseClient) dial(ctx context.Context) (*noiseconn.Conn, error) {
 		return nil, err
 	}
 
-	ncc, err := noiseconn.New(clientConn.Conn, nc.h2t, connID, nc.connClosed)
+	ncc, err := ts2021.New(clientConn.Conn, nc.h2t, connID, nc.connClosed)
 	if err != nil {
 		return nil, err
 	}

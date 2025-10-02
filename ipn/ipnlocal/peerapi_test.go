@@ -257,9 +257,19 @@ func TestPeerAPIPrettyReplyCNAME(t *testing.T) {
 		pm := must.Get(newProfileManager(new(mem.Store), t.Logf, ht))
 		var a *appc.AppConnector
 		if shouldStore {
-			a = appc.NewAppConnector(t.Logf, &appctest.RouteCollector{}, &appc.RouteInfo{}, fakeStoreRoutes)
+			a = appc.NewAppConnector(appc.Config{
+				Logf:            t.Logf,
+				EventBus:        sys.Bus.Get(),
+				RouteAdvertiser: &appctest.RouteCollector{},
+				RouteInfo:       &appc.RouteInfo{},
+				StoreRoutesFunc: fakeStoreRoutes,
+			})
 		} else {
-			a = appc.NewAppConnector(t.Logf, &appctest.RouteCollector{}, nil, nil)
+			a = appc.NewAppConnector(appc.Config{
+				Logf:            t.Logf,
+				EventBus:        sys.Bus.Get(),
+				RouteAdvertiser: &appctest.RouteCollector{},
+			})
 		}
 		sys.Set(pm.Store())
 		sys.Set(eng)
@@ -332,9 +342,15 @@ func TestPeerAPIReplyToDNSQueriesAreObserved(t *testing.T) {
 		eng, _ := wgengine.NewFakeUserspaceEngine(logger.Discard, 0, ht, reg, sys.Bus.Get(), sys.Set)
 		var a *appc.AppConnector
 		if shouldStore {
-			a = appc.NewAppConnector(t.Logf, rc, &appc.RouteInfo{}, fakeStoreRoutes)
+			a = appc.NewAppConnector(appc.Config{
+				Logf:            t.Logf,
+				EventBus:        sys.Bus.Get(),
+				RouteAdvertiser: rc,
+				RouteInfo:       &appc.RouteInfo{},
+				StoreRoutesFunc: fakeStoreRoutes,
+			})
 		} else {
-			a = appc.NewAppConnector(t.Logf, rc, nil, nil)
+			a = appc.NewAppConnector(appc.Config{Logf: t.Logf, EventBus: sys.Bus.Get(), RouteAdvertiser: rc})
 		}
 		sys.Set(pm.Store())
 		sys.Set(eng)
@@ -399,9 +415,15 @@ func TestPeerAPIReplyToDNSQueriesAreObservedWithCNAMEFlattening(t *testing.T) {
 		pm := must.Get(newProfileManager(new(mem.Store), t.Logf, ht))
 		var a *appc.AppConnector
 		if shouldStore {
-			a = appc.NewAppConnector(t.Logf, rc, &appc.RouteInfo{}, fakeStoreRoutes)
+			a = appc.NewAppConnector(appc.Config{
+				Logf:            t.Logf,
+				EventBus:        sys.Bus.Get(),
+				RouteAdvertiser: rc,
+				RouteInfo:       &appc.RouteInfo{},
+				StoreRoutesFunc: fakeStoreRoutes,
+			})
 		} else {
-			a = appc.NewAppConnector(t.Logf, rc, nil, nil)
+			a = appc.NewAppConnector(appc.Config{Logf: t.Logf, EventBus: sys.Bus.Get(), RouteAdvertiser: rc})
 		}
 		sys.Set(pm.Store())
 		sys.Set(eng)

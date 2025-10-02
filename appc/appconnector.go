@@ -22,6 +22,7 @@ import (
 	"tailscale.com/types/views"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/dnsname"
+	"tailscale.com/util/eventbus"
 	"tailscale.com/util/execqueue"
 	"tailscale.com/util/slicesx"
 )
@@ -136,7 +137,9 @@ type RouteInfo struct {
 // routes not yet served by the AppConnector the local node configuration is
 // updated to advertise the new route.
 type AppConnector struct {
+	// These fields are immutable after initialization.
 	logf            logger.Logf
+	eventBus        *eventbus.Bus
 	routeAdvertiser RouteAdvertiser
 
 	// storeRoutesFunc will be called to persist routes if it is not nil.
@@ -162,17 +165,50 @@ type AppConnector struct {
 	writeRateDay    *rateLogger
 }
 
+// Config carries the settings for an [AppConnector].
+type Config struct {
+	// Logf is the logger to which debug logs from the connector will be sent.
+	// It must be non-nil.
+	Logf logger.Logf
+
+	// EventBus receives events when the collection of routes maintained by the
+	// connector is updated. It must be non-nil.
+	EventBus *eventbus.Bus
+
+	// RouteAdvertiser allows the connector to update the set of advertised routes.
+	// It must be non-nil.
+	RouteAdvertiser RouteAdvertiser
+
+	// RouteInfo, if non-nil, use used as the initial set of routes for the
+	// connector.  If nil, the connector starts empty.
+	RouteInfo *RouteInfo
+
+	// StoreRoutesFunc, if non-nil, is called when the connector's routes
+	// change, to allow the routes to be persisted.
+	StoreRoutesFunc func(*RouteInfo) error
+}
+
 // NewAppConnector creates a new AppConnector.
-func NewAppConnector(logf logger.Logf, routeAdvertiser RouteAdvertiser, routeInfo *RouteInfo, storeRoutesFunc func(*RouteInfo) error) *AppConnector {
-	ac := &AppConnector{
-		logf:            logger.WithPrefix(logf, "appc: "),
-		routeAdvertiser: routeAdvertiser,
-		storeRoutesFunc: storeRoutesFunc,
+func NewAppConnector(c Config) *AppConnector {
+	switch {
+	case c.Logf == nil:
+		panic("missing logger")
+	case c.EventBus == nil:
+		panic("missing event bus")
+	case c.RouteAdvertiser == nil:
+		panic("missing route advertiser")
 	}
-	if routeInfo != nil {
-		ac.domains = routeInfo.Domains
-		ac.wildcards = routeInfo.Wildcards
-		ac.controlRoutes = routeInfo.Control
+
+	ac := &AppConnector{
+		logf:            logger.WithPrefix(c.Logf, "appc: "),
+		eventBus:        c.EventBus,
+		routeAdvertiser: c.RouteAdvertiser,
+		storeRoutesFunc: c.StoreRoutesFunc,
+	}
+	if c.RouteInfo != nil {
+		ac.domains = c.RouteInfo.Domains
+		ac.wildcards = c.RouteInfo.Wildcards
+		ac.controlRoutes = c.RouteInfo.Control
 	}
 	ac.writeRateMinute = newRateLogger(time.Now, time.Minute, func(c int64, s time.Time, l int64) {
 		ac.logf("routeInfo write rate: %d in minute starting at %v (%d routes)", c, s, l)

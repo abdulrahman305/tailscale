@@ -15,13 +15,14 @@ import (
 
 	"golang.org/x/net/http2"
 	"tailscale.com/control/controlhttp/controlhttpserver"
-	"tailscale.com/internal/noiseconn"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstest/nettest"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/util/eventbus/eventbustest"
 )
 
 // maxAllowedNoiseVersion is the highest we expect the Tailscale
@@ -175,6 +176,7 @@ func (tt noiseClientTest) run(t *testing.T) {
 	serverPrivate := key.NewMachine()
 	clientPrivate := key.NewMachine()
 	chalPrivate := key.NewChallenge()
+	bus := eventbustest.NewBus(t)
 
 	const msg = "Hello, client"
 	h2 := &http2.Server{}
@@ -194,6 +196,7 @@ func (tt noiseClientTest) run(t *testing.T) {
 	defer hs.Close()
 
 	dialer := tsdial.NewDialer(netmon.NewStatic())
+	dialer.SetBus(bus)
 	if nettest.PreferMemNetwork() {
 		dialer.SetSystemDialerForTest(nw.Dial)
 	}
@@ -307,7 +310,7 @@ func (up *Upgrader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// https://httpwg.org/specs/rfc7540.html#rfc.section.4.1 (Especially not
 		// an HTTP/2 settings frame, which isn't of type 'T')
 		var notH2Frame [5]byte
-		copy(notH2Frame[:], noiseconn.EarlyPayloadMagic)
+		copy(notH2Frame[:], ts2021.EarlyPayloadMagic)
 		var lenBuf [4]byte
 		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(earlyJSON)))
 		// These writes are all buffered by caller, so fine to do them

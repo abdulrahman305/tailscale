@@ -54,7 +54,6 @@ import (
 	"tailscale.com/types/tkatype"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/eventbus"
-	"tailscale.com/util/multierr"
 	"tailscale.com/util/singleflight"
 	"tailscale.com/util/syspolicy/pkey"
 	"tailscale.com/util/syspolicy/policyclient"
@@ -1307,7 +1306,7 @@ func loadServerPubKeys(ctx context.Context, httpc *http.Client, serverURL string
 	out = tailcfg.OverTLSPublicKeyResponse{}
 	k, err := key.ParseMachinePublicUntyped(mem.B(b))
 	if err != nil {
-		return nil, multierr.New(jsonErr, err)
+		return nil, errors.Join(jsonErr, err)
 	}
 	out.LegacyPublicKey = k
 	return &out, nil
@@ -1605,20 +1604,6 @@ func (c *Direct) DoNoiseRequest(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	return nc.Do(req)
-}
-
-// GetSingleUseNoiseRoundTripper returns a RoundTripper that can be only be used
-// once (and must be used once) to make a single HTTP request over the noise
-// channel to the coordination server.
-//
-// In addition to the RoundTripper, it returns the HTTP/2 channel's early noise
-// payload, if any.
-func (c *Direct) GetSingleUseNoiseRoundTripper(ctx context.Context) (http.RoundTripper, *tailcfg.EarlyNoise, error) {
-	nc, err := c.getNoiseClient()
-	if err != nil {
-		return nil, nil, err
-	}
-	return nc.GetSingleUseRoundTripper(ctx)
 }
 
 // doPingerPing sends a Ping to pr.IP using pinger, and sends an http request back to

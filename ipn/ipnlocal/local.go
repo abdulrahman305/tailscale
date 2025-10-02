@@ -9,7 +9,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -90,7 +89,6 @@ import (
 	"tailscale.com/util/eventbus"
 	"tailscale.com/util/goroutines"
 	"tailscale.com/util/mak"
-	"tailscale.com/util/multierr"
 	"tailscale.com/util/osuser"
 	"tailscale.com/util/rands"
 	"tailscale.com/util/set"
@@ -528,7 +526,7 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 	}()
 
 	netMon := sys.NetMon.Get()
-	b.sockstatLogger, err = sockstatlog.NewLogger(logpolicy.LogsDir(logf), logf, logID, netMon, sys.HealthTracker.Get())
+	b.sockstatLogger, err = sockstatlog.NewLogger(logpolicy.LogsDir(logf), logf, logID, netMon, sys.HealthTracker.Get(), sys.Bus.Get())
 	if err != nil {
 		log.Printf("error setting up sockstat logger: %v", err)
 	}
@@ -3981,7 +3979,7 @@ func (b *LocalBackend) checkPrefsLocked(p *ipn.Prefs) error {
 	if err := b.checkAutoUpdatePrefsLocked(p); err != nil {
 		errs = append(errs, err)
 	}
-	return multierr.New(errs...)
+	return errors.Join(errs...)
 }
 
 func (b *LocalBackend) checkSSHPrefsLocked(p *ipn.Prefs) error {
@@ -4225,7 +4223,7 @@ func (b *LocalBackend) checkEditPrefsAccessLocked(actor ipnauth.Actor, prefs ipn
 		}
 	}
 
-	return multierr.New(errs...)
+	return errors.Join(errs...)
 }
 
 // changeDisablesExitNodeLocked reports whether applying the change
@@ -4804,7 +4802,13 @@ func (b *LocalBackend) reconfigAppConnectorLocked(nm *netmap.NetworkMap, prefs i
 			}
 			storeFunc = b.storeRouteInfo
 		}
-		b.appConnector = appc.NewAppConnector(b.logf, b, ri, storeFunc)
+		b.appConnector = appc.NewAppConnector(appc.Config{
+			Logf:            b.logf,
+			EventBus:        b.sys.Bus.Get(),
+			RouteAdvertiser: b,
+			RouteInfo:       ri,
+			StoreRoutesFunc: storeFunc,
+		})
 	}
 	if nm == nil {
 		return
@@ -6539,62 +6543,6 @@ func (b *LocalBackend) EventBus() *eventbus.Bus {
 // MagicConn returns the backend's *magicsock.Conn.
 func (b *LocalBackend) MagicConn() *magicsock.Conn {
 	return b.sys.MagicSock.Get()
-}
-
-type keyProvingNoiseRoundTripper struct {
-	b *LocalBackend
-}
-
-func (n keyProvingNoiseRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	b := n.b
-
-	var priv key.NodePrivate
-
-	b.mu.Lock()
-	cc := b.ccAuto
-	if nm := b.NetMap(); nm != nil {
-		priv = nm.PrivateKey
-	}
-	b.mu.Unlock()
-	if cc == nil {
-		return nil, errors.New("no client")
-	}
-	if priv.IsZero() {
-		return nil, errors.New("no netmap or private key")
-	}
-	rt, ep, err := cc.GetSingleUseNoiseRoundTripper(req.Context())
-	if err != nil {
-		return nil, err
-	}
-	if ep == nil || ep.NodeKeyChallenge.IsZero() {
-		go rt.RoundTrip(new(http.Request)) // return our reservation with a bogus request
-		return nil, errors.New("this coordination server does not support API calls over the Noise channel")
-	}
-
-	// QueryEscape the node key since it has a colon in it.
-	nk := url.QueryEscape(priv.Public().String())
-	req.SetBasicAuth(nk, "")
-
-	// genNodeProofHeaderValue returns the Tailscale-Node-Proof header's value to prove
-	// to chalPub that we control claimedPrivate.
-	genNodeProofHeaderValue := func(claimedPrivate key.NodePrivate, chalPub key.ChallengePublic) string {
-		// TODO(bradfitz): cache this somewhere?
-		box := claimedPrivate.SealToChallenge(chalPub, []byte(chalPub.String()))
-		return claimedPrivate.Public().String() + " " + base64.StdEncoding.EncodeToString(box)
-	}
-
-	// And prove we have the private key corresponding to the public key sent
-	// tin the basic auth username.
-	req.Header.Set("Tailscale-Node-Proof", genNodeProofHeaderValue(priv, ep.NodeKeyChallenge))
-
-	return rt.RoundTrip(req)
-}
-
-// KeyProvingNoiseRoundTripper returns an http.RoundTripper that uses the LocalBackend's
-// DoNoiseRequest method and mutates the request to add an authorization header
-// to prove the client's nodekey.
-func (b *LocalBackend) KeyProvingNoiseRoundTripper() http.RoundTripper {
-	return keyProvingNoiseRoundTripper{b}
 }
 
 // DoNoiseRequest sends a request to URL over the control plane

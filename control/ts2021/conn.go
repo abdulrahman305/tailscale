@@ -1,12 +1,10 @@
 // Copyright (c) Tailscale Inc & AUTHORS
 // SPDX-License-Identifier: BSD-3-Clause
 
-// Package noiseconn contains an internal-only wrapper around controlbase.Conn
-// that properly handles the early payload sent by the server before the HTTP/2
-// session begins.
-//
-// See the documentation on the Conn type for more details.
-package noiseconn
+// Package ts2021 handles the details of the Tailscale 2021 control protocol
+// that are after (above) the Noise layer. In particular, the
+// "tailcfg.EarlyNoise" message and the subsequent HTTP/2 connection.
+package ts2021
 
 import (
 	"bytes"
@@ -82,22 +80,6 @@ func (c *Conn) GetEarlyPayload(ctx context.Context) (*tailcfg.EarlyNoise, error)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// ReserveNewRequest will reserve a new concurrent request on the connection.
-//
-// It returns whether the reservation was successful, and any early Noise
-// payload if present. If a reservation was not successful, it will return
-// false and nil for the early payload.
-func (c *Conn) ReserveNewRequest(ctx context.Context) (bool, *tailcfg.EarlyNoise, error) {
-	earlyPayloadMaybeNil, err := c.GetEarlyPayload(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-	if c.h2cc.ReserveNewRequest() {
-		return true, earlyPayloadMaybeNil, nil
-	}
-	return false, nil, nil
 }
 
 // CanTakeNewRequest reports whether the underlying HTTP/2 connection can take
