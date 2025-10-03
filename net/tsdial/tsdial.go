@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/gaissmai/bart"
+	"tailscale.com/feature"
+	"tailscale.com/feature/buildfeatures"
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/netknob"
 	"tailscale.com/net/netmon"
@@ -43,6 +45,13 @@ func NewDialer(netMon *netmon.Monitor) *Dialer {
 	d := &Dialer{}
 	d.SetNetMon(netMon)
 	return d
+}
+
+// NewFromFuncForDebug is like NewDialer but takes a netx.DialFunc
+// and no netMon. It's meant exclusively for the "tailscale debug ts2021"
+// debug command, and perhaps tests.
+func NewFromFuncForDebug(logf logger.Logf, dial netx.DialFunc) *Dialer {
+	return &Dialer{sysDialForTest: dial, Logf: logf}
 }
 
 // Dialer dials out of tailscaled, while taking care of details while
@@ -128,6 +137,9 @@ func (d *Dialer) TUNName() string {
 //
 // For example, "http://100.68.82.120:47830/dns-query".
 func (d *Dialer) SetExitDNSDoH(doh string) {
+	if !buildfeatures.HasUseExitNode {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.exitDNSDoHBase == doh {
@@ -365,7 +377,7 @@ func (d *Dialer) userDialResolve(ctx context.Context, network, addr string) (net
 	}
 
 	var r net.Resolver
-	if exitDNSDoH != "" {
+	if buildfeatures.HasUseExitNode && buildfeatures.HasPeerAPIClient && exitDNSDoH != "" {
 		r.PreferGo = true
 		r.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
 			return &dohConn{
@@ -420,7 +432,7 @@ func (d *Dialer) SetSystemDialerForTest(fn netx.DialFunc) {
 // Control and (in the future, as of 2022-04-27) DERPs..
 func (d *Dialer) SystemDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	d.mu.Lock()
-	if d.netMon == nil {
+	if d.netMon == nil && d.sysDialForTest == nil {
 		d.mu.Unlock()
 		if testenv.InTest() {
 			panic("SystemDial requires a netmon.Monitor; call SetNetMon first")
@@ -502,6 +514,9 @@ func (d *Dialer) UserDial(ctx context.Context, network, addr string) (net.Conn, 
 // network must a "tcp" type, and addr must be an ip:port. Name resolution
 // is not supported.
 func (d *Dialer) dialPeerAPI(ctx context.Context, network, addr string) (net.Conn, error) {
+	if !buildfeatures.HasPeerAPIClient {
+		return nil, feature.ErrUnavailable
+	}
 	switch network {
 	case "tcp", "tcp6", "tcp4":
 	default:
@@ -544,6 +559,9 @@ func (d *Dialer) getPeerDialer() *net.Dialer {
 // The returned Client must not be mutated; it's owned by the Dialer
 // and shared by callers.
 func (d *Dialer) PeerAPIHTTPClient() *http.Client {
+	if !buildfeatures.HasPeerAPIClient {
+		panic("unreachable")
+	}
 	d.peerClientOnce.Do(func() {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		t.Dial = nil

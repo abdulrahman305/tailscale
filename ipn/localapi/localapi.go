@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
-	"tailscale.com/appc"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/envknob"
 	"tailscale.com/feature"
@@ -38,6 +37,7 @@ import (
 	"tailscale.com/net/netutil"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstime"
+	"tailscale.com/types/appctype"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
@@ -72,7 +72,6 @@ var handler = map[string]LocalAPIHandler{
 	// The other /localapi/v0/NAME handlers are exact matches and contain only NAME
 	// without a trailing slash:
 	"alpha-set-device-attrs":       (*Handler).serveSetDeviceAttrs, // see tailscale/corp#24690
-	"bugreport":                    (*Handler).serveBugReport,
 	"check-ip-forwarding":          (*Handler).serveCheckIPForwarding,
 	"check-prefs":                  (*Handler).serveCheckPrefs,
 	"check-reverse-path-filtering": (*Handler).serveCheckReversePathFiltering,
@@ -90,21 +89,17 @@ var handler = map[string]LocalAPIHandler{
 	"logtap":                       (*Handler).serveLogTap,
 	"metrics":                      (*Handler).serveMetrics,
 	"ping":                         (*Handler).servePing,
-	"pprof":                        (*Handler).servePprof,
 	"prefs":                        (*Handler).servePrefs,
 	"query-feature":                (*Handler).serveQueryFeature,
 	"reload-config":                (*Handler).reloadConfig,
 	"reset-auth":                   (*Handler).serveResetAuth,
-	"set-dns":                      (*Handler).serveSetDNS,
 	"set-expiry-sooner":            (*Handler).serveSetExpirySooner,
 	"set-gui-visible":              (*Handler).serveSetGUIVisible,
 	"set-push-device-token":        (*Handler).serveSetPushDeviceToken,
 	"set-udp-gro-forwarding":       (*Handler).serveSetUDPGROForwarding,
-	"set-use-exit-node-enabled":    (*Handler).serveSetUseExitNodeEnabled,
 	"shutdown":                     (*Handler).serveShutdown,
 	"start":                        (*Handler).serveStart,
 	"status":                       (*Handler).serveStatus,
-	"suggest-exit-node":            (*Handler).serveSuggestExitNode,
 	"update/check":                 (*Handler).serveUpdateCheck,
 	"upload-client-metrics":        (*Handler).serveUploadClientMetrics,
 	"usermetrics":                  (*Handler).serveUserMetrics,
@@ -115,6 +110,17 @@ var handler = map[string]LocalAPIHandler{
 func init() {
 	if buildfeatures.HasAppConnectors {
 		Register("appc-route-info", (*Handler).serveGetAppcRouteInfo)
+	}
+	if buildfeatures.HasUseExitNode {
+		Register("suggest-exit-node", (*Handler).serveSuggestExitNode)
+		Register("set-use-exit-node-enabled", (*Handler).serveSetUseExitNodeEnabled)
+	}
+	if buildfeatures.HasACME {
+		Register("set-dns", (*Handler).serveSetDNS)
+	}
+	if buildfeatures.HasDebug {
+		Register("bugreport", (*Handler).serveBugReport)
+		Register("pprof", (*Handler).servePprof)
 	}
 }
 
@@ -1218,6 +1224,11 @@ func (h *Handler) serveHandlePushMessage(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) serveUploadClientMetrics(w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasClientMetrics {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(struct{}{})
+		return
+	}
 	if r.Method != httpm.POST {
 		http.Error(w, "unsupported method", http.StatusMethodNotAllowed)
 		return
@@ -1286,6 +1297,10 @@ func (h *Handler) serveSetGUIVisible(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveSetUseExitNodeEnabled(w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasUseExitNode {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	if r.Method != httpm.POST {
 		http.Error(w, "use POST", http.StatusMethodNotAllowed)
 		return
@@ -1624,6 +1639,10 @@ func dnsMessageTypeForString(s string) (t dnsmessage.Type, err error) {
 
 // serveSuggestExitNode serves a POST endpoint for returning a suggested exit node.
 func (h *Handler) serveSuggestExitNode(w http.ResponseWriter, r *http.Request) {
+	if !buildfeatures.HasUseExitNode {
+		http.Error(w, feature.ErrUnavailable.Error(), http.StatusNotImplemented)
+		return
+	}
 	if r.Method != httpm.GET {
 		http.Error(w, "only GET allowed", http.StatusMethodNotAllowed)
 		return
@@ -1684,7 +1703,7 @@ func (h *Handler) serveGetAppcRouteInfo(w http.ResponseWriter, r *http.Request) 
 	res, err := h.b.ReadRouteInfo()
 	if err != nil {
 		if errors.Is(err, ipn.ErrStateNotExist) {
-			res = &appc.RouteInfo{}
+			res = &appctype.RouteInfo{}
 		} else {
 			WriteErrorJSON(w, err)
 			return

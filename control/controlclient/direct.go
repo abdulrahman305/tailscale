@@ -28,6 +28,7 @@ import (
 
 	"go4.org/mem"
 	"tailscale.com/control/controlknobs"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/envknob"
 	"tailscale.com/feature"
 	"tailscale.com/feature/buildfeatures"
@@ -95,8 +96,8 @@ type Direct struct {
 	serverLegacyKey key.MachinePublic // original ("legacy") nacl crypto_box-based public key; only used for signRegisterRequest on Windows now
 	serverNoiseKey  key.MachinePublic
 
-	sfGroup     singleflight.Group[struct{}, *NoiseClient] // protects noiseClient creation.
-	noiseClient *NoiseClient
+	sfGroup     singleflight.Group[struct{}, *ts2021.Client] // protects noiseClient creation.
+	noiseClient *ts2021.Client
 
 	persist                 persist.PersistView
 	authKey                 string
@@ -329,7 +330,7 @@ func NewDirect(opts Options) (*Direct, error) {
 		}
 	}
 	if opts.NoiseTestClient != nil {
-		c.noiseClient = &NoiseClient{
+		c.noiseClient = &ts2021.Client{
 			Client: opts.NoiseTestClient,
 		}
 		c.serverNoiseKey = key.NewMachine().Public() // prevent early error before hitting test client
@@ -359,9 +360,7 @@ func (c *Direct) Close() error {
 		}
 	}
 	c.noiseClient = nil
-	if tr, ok := c.httpc.Transport.(*http.Transport); ok {
-		tr.CloseIdleConnections()
-	}
+	c.httpc.CloseIdleConnections()
 	return nil
 }
 
@@ -703,8 +702,8 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 	if err != nil {
 		return regen, opt.URL, nil, err
 	}
-	addLBHeader(req, request.OldNodeKey)
-	addLBHeader(req, request.NodeKey)
+	ts2021.AddLBHeader(req, request.OldNodeKey)
+	ts2021.AddLBHeader(req, request.NodeKey)
 
 	res, err := httpc.Do(req)
 	if err != nil {
@@ -1012,7 +1011,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 	if err != nil {
 		return err
 	}
-	addLBHeader(req, nodeKey)
+	ts2021.AddLBHeader(req, nodeKey)
 
 	res, err := httpc.Do(req)
 	if err != nil {
@@ -1092,7 +1091,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 		vlogf("netmap: read body after %v", time.Since(t0).Round(time.Millisecond))
 
 		var resp tailcfg.MapResponse
-		if err := c.decodeMsg(msg, &resp); err != nil {
+		if err := sess.decodeMsg(msg, &resp); err != nil {
 			vlogf("netmap: decode error: %v", err)
 			return err
 		}
@@ -1241,12 +1240,23 @@ func decode(res *http.Response, v any) error {
 
 var jsonEscapedZero = []byte(`\u0000`)
 
+const justKeepAliveStr = `{"KeepAlive":true}`
+
 // decodeMsg is responsible for uncompressing msg and unmarshaling into v.
-func (c *Direct) decodeMsg(compressedMsg []byte, v any) error {
+func (sess *mapSession) decodeMsg(compressedMsg []byte, v *tailcfg.MapResponse) error {
+	// Fast path for common case of keep-alive message.
+	// See tailscale/tailscale#17343.
+	if sess.keepAliveZ != nil && bytes.Equal(compressedMsg, sess.keepAliveZ) {
+		v.KeepAlive = true
+		return nil
+	}
+
 	b, err := zstdframe.AppendDecode(nil, compressedMsg)
 	if err != nil {
 		return err
 	}
+	sess.ztdDecodesForTest++
+
 	if DevKnob.DumpNetMaps() {
 		var buf bytes.Buffer
 		json.Indent(&buf, b, "", "    ")
@@ -1258,6 +1268,9 @@ func (c *Direct) decodeMsg(compressedMsg []byte, v any) error {
 	}
 	if err := json.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("response: %v", err)
+	}
+	if v.KeepAlive && string(b) == justKeepAliveStr {
+		sess.keepAliveZ = compressedMsg
 	}
 	return nil
 }
@@ -1396,6 +1409,9 @@ func (c *Direct) answerPing(pr *tailcfg.PingRequest) {
 		answerHeadPing(c.logf, httpc, pr)
 		return
 	case "c2n":
+		if !buildfeatures.HasC2N {
+			return
+		}
 		if !useNoise && !envknob.Bool("TS_DEBUG_PERMIT_HTTP_C2N") {
 			c.logf("refusing to answer c2n ping without noise")
 			return
@@ -1507,7 +1523,7 @@ func sleepAsRequested(ctx context.Context, logf logger.Logf, d time.Duration, cl
 }
 
 // getNoiseClient returns the noise client, creating one if one doesn't exist.
-func (c *Direct) getNoiseClient() (*NoiseClient, error) {
+func (c *Direct) getNoiseClient() (*ts2021.Client, error) {
 	c.mu.Lock()
 	serverNoiseKey := c.serverNoiseKey
 	nc := c.noiseClient
@@ -1522,13 +1538,13 @@ func (c *Direct) getNoiseClient() (*NoiseClient, error) {
 	if c.dialPlan != nil {
 		dp = c.dialPlan.Load
 	}
-	nc, err, _ := c.sfGroup.Do(struct{}{}, func() (*NoiseClient, error) {
+	nc, err, _ := c.sfGroup.Do(struct{}{}, func() (*ts2021.Client, error) {
 		k, err := c.getMachinePrivKey()
 		if err != nil {
 			return nil, err
 		}
 		c.logf("[v1] creating new noise client")
-		nc, err := NewNoiseClient(NoiseOpts{
+		nc, err := ts2021.NewClient(ts2021.ClientOpts{
 			PrivKey:       k,
 			ServerPubKey:  serverNoiseKey,
 			ServerURL:     c.serverURL,
@@ -1562,7 +1578,7 @@ func (c *Direct) setDNSNoise(ctx context.Context, req *tailcfg.SetDNSRequest) er
 	if err != nil {
 		return err
 	}
-	res, err := nc.post(ctx, "/machine/set-dns", newReq.NodeKey, &newReq)
+	res, err := nc.Post(ctx, "/machine/set-dns", newReq.NodeKey, &newReq)
 	if err != nil {
 		return err
 	}
@@ -1662,47 +1678,6 @@ func postPingResult(start time.Time, logf logger.Logf, c *http.Client, pr *tailc
 	return nil
 }
 
-// ReportWarnableChange reports to the control plane a change to this node's
-// health. w must be non-nil. us can be nil to indicate a healthy state for w.
-func (c *Direct) ReportWarnableChange(w *health.Warnable, us *health.UnhealthyState) {
-	if w == health.NetworkStatusWarnable || w == health.IPNStateWarnable || w == health.LoginStateWarnable {
-		// We don't report these. These include things like the network is down
-		// (in which case we can't report anyway) or the user wanted things
-		// stopped, as opposed to the more unexpected failure types in the other
-		// subsystems.
-		return
-	}
-	np, err := c.getNoiseClient()
-	if err != nil {
-		// Don't report errors to control if the server doesn't support noise.
-		return
-	}
-	nodeKey, ok := c.GetPersist().PublicNodeKeyOK()
-	if !ok {
-		return
-	}
-	if c.panicOnUse {
-		panic("tainted client")
-	}
-	// TODO(angott): at some point, update `Subsys` in the request to be `Warnable`
-	req := &tailcfg.HealthChangeRequest{
-		Subsys:  string(w.Code),
-		NodeKey: nodeKey,
-	}
-	if us != nil {
-		req.Error = us.Text
-	}
-
-	// Best effort, no logging:
-	ctx, cancel := context.WithTimeout(c.closedCtx, 5*time.Second)
-	defer cancel()
-	res, err := np.post(ctx, "/machine/update-health", nodeKey, req)
-	if err != nil {
-		return
-	}
-	res.Body.Close()
-}
-
 // SetDeviceAttrs does a synchronous call to the control plane to update
 // the node's attributes.
 //
@@ -1741,7 +1716,7 @@ func (c *Direct) SetDeviceAttrs(ctx context.Context, attrs tailcfg.AttrUpdate) e
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	res, err := nc.doWithBody(ctx, "PATCH", "/machine/set-device-attr", nodeKey, req)
+	res, err := nc.DoWithBody(ctx, "PATCH", "/machine/set-device-attr", nodeKey, req)
 	if err != nil {
 		return err
 	}
@@ -1782,7 +1757,7 @@ func (c *Direct) sendAuditLog(ctx context.Context, auditLog tailcfg.AuditLogRequ
 		panic("tainted client")
 	}
 
-	res, err := nc.post(ctx, "/machine/audit-log", nodeKey, req)
+	res, err := nc.Post(ctx, "/machine/audit-log", nodeKey, req)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errHTTPPostFailure, err)
 	}
@@ -1792,12 +1767,6 @@ func (c *Direct) sendAuditLog(ctx context.Context, auditLog tailcfg.AuditLogRequ
 		return errBadHTTPResponse(res.StatusCode, string(all))
 	}
 	return nil
-}
-
-func addLBHeader(req *http.Request, nodeKey key.NodePublic) {
-	if !nodeKey.IsZero() {
-		req.Header.Add(tailcfg.LBHeader, nodeKey.String())
-	}
 }
 
 // makeScreenTimeDetectingDialFunc returns dialFunc, optionally wrapped (on

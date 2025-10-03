@@ -172,7 +172,8 @@ type CapabilityVersion int
 //   - 125: 2025-08-11: dnstype.Resolver adds UseWithExitNode field.
 //   - 126: 2025-09-17: Client uses seamless key renewal unless disabled by control (tailscale/corp#31479)
 //   - 127: 2025-09-19: can handle C2N /debug/netmap.
-const CurrentCapabilityVersion CapabilityVersion = 127
+//   - 128: 2025-10-02: can handle C2N /debug/health.
+const CurrentCapabilityVersion CapabilityVersion = 128
 
 // ID is an integer ID for a user, node, or login allocated by the
 // control plane.
@@ -2691,6 +2692,12 @@ const (
 	// numbers, apostrophe, spaces, and hyphens. This may not be true for the default.
 	// Values can look like "foo.com" or "Foo's Test Tailnet - Staging".
 	NodeAttrTailnetDisplayName NodeCapability = "tailnet-display-name"
+
+	// NodeAttrClientSideReachability configures the node to determine
+	// reachability itself when choosing connectors. When absent, the
+	// default behavior is to trust the control plane when it claims that a
+	// node is no longer online, but that is not a reliable signal.
+	NodeAttrClientSideReachability = "client-side-reachability"
 )
 
 // SetDNSRequest is a request to add a DNS record.
@@ -2734,6 +2741,9 @@ type SetDNSResponse struct{}
 // node health changes to:
 //
 //	POST https://<control-plane>/machine/update-health.
+//
+// As of 2025-10-02, we stopped sending this to the control plane proactively.
+// It was never useful enough with its current design and needs more thought.
 type HealthChangeRequest struct {
 	Subsys string // a health.Subsystem value in string form
 	Error  string // or empty if cleared
