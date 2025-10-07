@@ -265,6 +265,9 @@ func TestMinTailscaledWithCLI(t *testing.T) {
 		"hujson",
 		"pprof",
 		"multierr", // https://github.com/tailscale/tailscale/pull/17379
+		"tailscale.com/metrics",
+		"tailscale.com/tsweb/varz",
+		"dirwalk",
 	}
 	deptest.DepChecker{
 		GOOS:   "linux",
@@ -279,6 +282,7 @@ func TestMinTailscaledWithCLI(t *testing.T) {
 		},
 		BadDeps: map[string]string{
 			"golang.org/x/net/http2": "unexpected x/net/http2 dep; tailscale/tailscale#17305",
+			"expvar":                 "unexpected expvar dep",
 		},
 	}.Check(t)
 }

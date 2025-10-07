@@ -313,9 +313,8 @@ type LocalBackend struct {
 	serveListeners     map[netip.AddrPort]*localListener // listeners for local serve traffic
 	serveProxyHandlers sync.Map                          // string (HTTPHandler.Proxy) => *reverseProxy
 
-	// statusLock must be held before calling statusChanged.Wait() or
+	// mu must be held before calling statusChanged.Wait() or
 	// statusChanged.Broadcast().
-	statusLock    sync.Mutex
 	statusChanged *sync.Cond
 
 	// dialPlan is any dial plan that we've received from the control
@@ -542,7 +541,7 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 
 	b.setTCPPortsIntercepted(nil)
 
-	b.statusChanged = sync.NewCond(&b.statusLock)
+	b.statusChanged = sync.NewCond(&b.mu)
 	b.e.SetStatusCallback(b.setWgengineStatus)
 
 	b.prevIfState = netMon.InterfaceState()
@@ -586,8 +585,15 @@ func NewLocalBackend(logf logger.Logf, logID logid.PublicID, sys *tsd.System, lo
 func (b *LocalBackend) consumeEventbusTopics(ec *eventbus.Client) func(*eventbus.Client) {
 	clientVersionSub := eventbus.Subscribe[tailcfg.ClientVersion](ec)
 	autoUpdateSub := eventbus.Subscribe[controlclient.AutoUpdate](ec)
-	healthChangeSub := eventbus.Subscribe[health.Change](ec)
+
+	var healthChange <-chan health.Change
+	if buildfeatures.HasHealth {
+		healthChangeSub := eventbus.Subscribe[health.Change](ec)
+		healthChange = healthChangeSub.Events()
+	}
 	changeDeltaSub := eventbus.Subscribe[netmon.ChangeDelta](ec)
+	routeUpdateSub := eventbus.Subscribe[appctype.RouteUpdate](ec)
+	storeRoutesSub := eventbus.Subscribe[appctype.RouteInfo](ec)
 
 	var portlist <-chan PortlistServices
 	if buildfeatures.HasPortList {
@@ -604,13 +610,34 @@ func (b *LocalBackend) consumeEventbusTopics(ec *eventbus.Client) func(*eventbus
 				b.onClientVersion(&clientVersion)
 			case au := <-autoUpdateSub.Events():
 				b.onTailnetDefaultAutoUpdate(au.Value)
-			case change := <-healthChangeSub.Events():
+			case change := <-healthChange:
 				b.onHealthChange(change)
 			case changeDelta := <-changeDeltaSub.Events():
 				b.linkChange(&changeDelta)
+
 			case pl := <-portlist:
 				if buildfeatures.HasPortList { // redundant, but explicit for linker deadcode and humans
 					b.setPortlistServices(pl)
+				}
+			case ru := <-routeUpdateSub.Events():
+				// TODO(creachadair, 2025-10-02): It is currently possible for updates produced under
+				// one profile to arrive and be applied after a switch to another profile.
+				// We need to find a way to ensure that changes to the backend state are applied
+				// consistently in the presnce of profile changes, which currently may not happen in
+				// a single atomic step.  See: https://github.com/tailscale/tailscale/issues/17414
+				if err := b.AdvertiseRoute(ru.Advertise...); err != nil {
+					b.logf("appc: failed to advertise routes: %v: %v", ru.Advertise, err)
+				}
+				if err := b.UnadvertiseRoute(ru.Unadvertise...); err != nil {
+					b.logf("appc: failed to unadvertise routes: %v: %v", ru.Unadvertise, err)
+				}
+			case ri := <-storeRoutesSub.Events():
+				// Whether or not routes should be stored can change over time.
+				shouldStoreRoutes := b.ControlKnobs().AppCStoreRoutes.Load()
+				if shouldStoreRoutes {
+					if err := b.storeRouteInfo(ri); err != nil {
+						b.logf("appc: failed to store route info: %v", err)
+					}
 				}
 			}
 		}
@@ -996,6 +1023,9 @@ var (
 )
 
 func (b *LocalBackend) onHealthChange(change health.Change) {
+	if !buildfeatures.HasHealth {
+		return
+	}
 	if change.WarnableChanged {
 		w := change.Warnable
 		us := change.UnhealthyState
@@ -2257,14 +2287,15 @@ func (b *LocalBackend) setWgengineStatus(s *wgengine.Status, err error) {
 	b.send(ipn.Notify{Engine: &es})
 }
 
+// broadcastStatusChanged must not be called with b.mu held.
 func (b *LocalBackend) broadcastStatusChanged() {
 	// The sync.Cond docs say: "It is allowed but not required for the caller to hold c.L during the call."
-	// In this particular case, we must acquire b.statusLock. Otherwise we might broadcast before
+	// In this particular case, we must acquire b.mu. Otherwise we might broadcast before
 	// the waiter (in requestEngineStatusAndWait) starts to wait, in which case
 	// the waiter can get stuck indefinitely. See PR 2865.
-	b.statusLock.Lock()
+	b.mu.Lock()
 	b.statusChanged.Broadcast()
-	b.statusLock.Unlock()
+	b.mu.Unlock()
 }
 
 // SetNotifyCallback sets the function to call when the backend has something to
@@ -3335,11 +3366,12 @@ func (b *LocalBackend) popBrowserAuthNow(url string, keyExpired bool, recipient 
 	if !b.seamlessRenewalEnabled() || keyExpired {
 		b.blockEngineUpdates(true)
 		b.stopEngineAndWait()
+
+		if b.State() == ipn.Running {
+			b.enterState(ipn.Starting)
+		}
 	}
 	b.tellRecipientToBrowseToURL(url, toNotificationTarget(recipient))
-	if b.State() == ipn.Running {
-		b.enterState(ipn.Starting)
-	}
 }
 
 // validPopBrowserURL reports whether urlStr is a valid value for a
@@ -4827,35 +4859,27 @@ func (b *LocalBackend) reconfigAppConnectorLocked(nm *netmap.NetworkMap, prefs i
 		}
 	}()
 
+	// App connectors have been disabled.
 	if !prefs.AppConnector().Advertise {
 		b.appConnector.Close() // clean up a previous connector (safe on nil)
 		b.appConnector = nil
 		return
 	}
 
-	shouldAppCStoreRoutes := b.ControlKnobs().AppCStoreRoutes.Load()
-	if b.appConnector == nil || b.appConnector.ShouldStoreRoutes() != shouldAppCStoreRoutes {
-		var ri *appctype.RouteInfo
-		var storeFunc func(*appctype.RouteInfo) error
-		if shouldAppCStoreRoutes {
-			var err error
-			ri, err = b.readRouteInfoLocked()
-			if err != nil {
-				ri = &appctype.RouteInfo{}
-				if err != ipn.ErrStateNotExist {
-					b.logf("Unsuccessful Read RouteInfo: ", err)
-				}
-			}
-			storeFunc = b.storeRouteInfo
+	// We don't (yet) have an app connector configured, or the configured
+	// connector has a different route persistence setting.
+	shouldStoreRoutes := b.ControlKnobs().AppCStoreRoutes.Load()
+	if b.appConnector == nil || (shouldStoreRoutes != b.appConnector.ShouldStoreRoutes()) {
+		ri, err := b.readRouteInfoLocked()
+		if err != nil && err != ipn.ErrStateNotExist {
+			b.logf("Unsuccessful Read RouteInfo: %v", err)
 		}
-
 		b.appConnector.Close() // clean up a previous connector (safe on nil)
 		b.appConnector = appc.NewAppConnector(appc.Config{
 			Logf:            b.logf,
 			EventBus:        b.sys.Bus.Get(),
-			RouteAdvertiser: b,
 			RouteInfo:       ri,
-			StoreRoutesFunc: storeFunc,
+			HasStoredRoutes: shouldStoreRoutes,
 		})
 	}
 	if nm == nil {
@@ -5505,7 +5529,13 @@ func (b *LocalBackend) enterStateLockedOnEntry(newState ipn.State, unlock unlock
 	activeLogin := b.activeLogin
 	authURL := b.authURL
 	if newState == ipn.Running {
-		b.resetAuthURLLocked()
+		// TODO(zofrex): Is this needed? As of 2025-10-03 it doesn't seem to be
+		// necessary when logging in or authenticating. When do we need to reset it
+		// here, rather than the other places it is reset? We should test if it is
+		// necessary and add unit tests to cover those cases, or remove it.
+		if oldState != ipn.Running {
+			b.resetAuthURLLocked()
+		}
 
 		// Start a captive portal detection loop if none has been
 		// started. Create a new context if none is present, since it
@@ -5742,29 +5772,38 @@ func (u unlockOnce) UnlockEarly() {
 }
 
 // stopEngineAndWait deconfigures the local network data plane, and
-// waits for it to deliver a status update before returning.
-//
-// TODO(danderson): this may be racy. We could unblock upon receiving
-// a status update that predates the "I've shut down" update.
+// waits for it to deliver a status update indicating it has stopped
+// before returning.
 func (b *LocalBackend) stopEngineAndWait() {
 	b.logf("stopEngineAndWait...")
 	b.e.Reconfig(&wgcfg.Config{}, &router.Config{}, &dns.Config{})
-	b.requestEngineStatusAndWait()
+	b.requestEngineStatusAndWaitForStopped()
 	b.logf("stopEngineAndWait: done.")
 }
 
-// Requests the wgengine status, and does not return until the status
-// was delivered (to the usual callback).
-func (b *LocalBackend) requestEngineStatusAndWait() {
-	b.logf("requestEngineStatusAndWait")
+// Requests the wgengine status, and does not return until a status was
+// delivered (to the usual callback) that indicates the engine is stopped.
+func (b *LocalBackend) requestEngineStatusAndWaitForStopped() {
+	b.logf("requestEngineStatusAndWaitForStopped")
 
-	b.statusLock.Lock()
-	defer b.statusLock.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	b.goTracker.Go(b.e.RequestStatus)
-	b.logf("requestEngineStatusAndWait: waiting...")
-	b.statusChanged.Wait() // temporarily releases lock while waiting
-	b.logf("requestEngineStatusAndWait: got status update.")
+	b.logf("requestEngineStatusAndWaitForStopped: waiting...")
+	for {
+		b.statusChanged.Wait() // temporarily releases lock while waiting
+
+		if !b.blocked {
+			b.logf("requestEngineStatusAndWaitForStopped: engine is no longer blocked, must have stopped and started again, not safe to wait.")
+			break
+		}
+		if b.engineStatus.NumLive == 0 && b.engineStatus.LiveDERPs == 0 {
+			b.logf("requestEngineStatusAndWaitForStopped: engine is stopped.")
+			break
+		}
+		b.logf("requestEngineStatusAndWaitForStopped: engine is still running. Waiting...")
+	}
 }
 
 // setControlClientLocked sets the control client to cc,
@@ -6025,10 +6064,10 @@ func (b *LocalBackend) resolveExitNode() (changed bool) {
 //
 // b.mu must be held.
 func (b *LocalBackend) reconcilePrefsLocked(prefs *ipn.Prefs) (changed bool) {
-	if b.applySysPolicyLocked(prefs) {
+	if buildfeatures.HasSystemPolicy && b.applySysPolicyLocked(prefs) {
 		changed = true
 	}
-	if b.resolveExitNodeInPrefsLocked(prefs) {
+	if buildfeatures.HasUseExitNode && b.resolveExitNodeInPrefsLocked(prefs) {
 		changed = true
 	}
 	if changed {
@@ -6043,6 +6082,9 @@ func (b *LocalBackend) reconcilePrefsLocked(prefs *ipn.Prefs) (changed bool) {
 //
 // b.mu must be held.
 func (b *LocalBackend) resolveExitNodeInPrefsLocked(prefs *ipn.Prefs) (changed bool) {
+	if !buildfeatures.HasUseExitNode {
+		return false
+	}
 	if b.resolveAutoExitNodeLocked(prefs) {
 		changed = true
 	}
@@ -6338,6 +6380,9 @@ func peerAPIPorts(peer tailcfg.NodeView) (p4, p6 uint16) {
 }
 
 func (b *LocalBackend) CheckIPForwarding() error {
+	if !buildfeatures.HasAdvertiseRoutes {
+		return nil
+	}
 	if b.sys.IsNetstackRouter() {
 		return nil
 	}
@@ -6978,9 +7023,9 @@ func (b *LocalBackend) ObserveDNSResponse(res []byte) error {
 // ErrDisallowedAutoRoute is returned by AdvertiseRoute when a route that is not allowed is requested.
 var ErrDisallowedAutoRoute = errors.New("route is not allowed")
 
-// AdvertiseRoute implements the appc.RouteAdvertiser interface. It sets a new
-// route advertisement if one is not already present in the existing routes.
-// If the route is disallowed, ErrDisallowedAutoRoute is returned.
+// AdvertiseRoute implements the appctype.RouteAdvertiser interface. It sets a
+// new route advertisement if one is not already present in the existing
+// routes.  If the route is disallowed, ErrDisallowedAutoRoute is returned.
 func (b *LocalBackend) AdvertiseRoute(ipps ...netip.Prefix) error {
 	finalRoutes := b.Prefs().AdvertiseRoutes().AsSlice()
 	var newRoutes []netip.Prefix
@@ -7036,8 +7081,8 @@ func coveredRouteRangeNoDefault(finalRoutes []netip.Prefix, ipp netip.Prefix) bo
 	return false
 }
 
-// UnadvertiseRoute implements the appc.RouteAdvertiser interface. It removes
-// a route advertisement if one is present in the existing routes.
+// UnadvertiseRoute implements the appctype.RouteAdvertiser interface. It
+// removes a route advertisement if one is present in the existing routes.
 func (b *LocalBackend) UnadvertiseRoute(toRemove ...netip.Prefix) error {
 	currentRoutes := b.Prefs().AdvertiseRoutes().AsSlice()
 	finalRoutes := currentRoutes[:0]
@@ -7065,7 +7110,7 @@ func namespaceKeyForCurrentProfile(pm *profileManager, key ipn.StateKey) ipn.Sta
 
 const routeInfoStateStoreKey ipn.StateKey = "_routeInfo"
 
-func (b *LocalBackend) storeRouteInfo(ri *appctype.RouteInfo) error {
+func (b *LocalBackend) storeRouteInfo(ri appctype.RouteInfo) error {
 	if !buildfeatures.HasAppConnectors {
 		return feature.ErrUnavailable
 	}

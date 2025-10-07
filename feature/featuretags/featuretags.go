@@ -159,6 +159,7 @@ var Features = map[FeatureTag]FeatureMeta{
 	"hujsonconf":    {Sym: "HuJSONConf", Desc: "HuJSON config file support"},
 	"iptables":      {Sym: "IPTables", Desc: "Linux iptables support"},
 	"kube":          {Sym: "Kube", Desc: "Kubernetes integration"},
+	"lazywg":        {Sym: "LazyWG", Desc: "Lazy WireGuard configuration for memory-constrained devices with large netmaps"},
 	"linuxdnsfight": {Sym: "LinuxDNSFight", Desc: "Linux support for detecting DNS fights (inotify watching of /etc/resolv.conf)"},
 	"listenrawdisco": {
 		Sym:  "ListenRawDisco",
@@ -268,6 +269,10 @@ var Features = map[FeatureTag]FeatureMeta{
 	"useproxy": {
 		Sym:  "UseProxy",
 		Desc: "Support using system proxies as specified by env vars or the system configuration to reach Tailscale servers.",
+	},
+	"usermetrics": {
+		Sym:  "UserMetrics",
+		Desc: "Usermetrics (documented, stable) metrics support",
 	},
 	"wakeonlan": {Sym: "WakeOnLAN", Desc: "Wake-on-LAN support"},
 	"webclient": {

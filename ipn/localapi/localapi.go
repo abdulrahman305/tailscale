@@ -72,15 +72,12 @@ var handler = map[string]LocalAPIHandler{
 	// The other /localapi/v0/NAME handlers are exact matches and contain only NAME
 	// without a trailing slash:
 	"alpha-set-device-attrs":       (*Handler).serveSetDeviceAttrs, // see tailscale/corp#24690
-	"check-ip-forwarding":          (*Handler).serveCheckIPForwarding,
 	"check-prefs":                  (*Handler).serveCheckPrefs,
 	"check-reverse-path-filtering": (*Handler).serveCheckReversePathFiltering,
 	"check-udp-gro-forwarding":     (*Handler).serveCheckUDPGROForwarding,
 	"derpmap":                      (*Handler).serveDERPMap,
 	"dial":                         (*Handler).serveDial,
 	"disconnect-control":           (*Handler).disconnectControl,
-	"dns-osconfig":                 (*Handler).serveDNSOSConfig,
-	"dns-query":                    (*Handler).serveDNSQuery,
 	"goroutines":                   (*Handler).serveGoroutines,
 	"handle-push-message":          (*Handler).serveHandlePushMessage,
 	"id-token":                     (*Handler).serveIDToken,
@@ -102,7 +99,6 @@ var handler = map[string]LocalAPIHandler{
 	"status":                       (*Handler).serveStatus,
 	"update/check":                 (*Handler).serveUpdateCheck,
 	"upload-client-metrics":        (*Handler).serveUploadClientMetrics,
-	"usermetrics":                  (*Handler).serveUserMetrics,
 	"watch-ipn-bus":                (*Handler).serveWatchIPNBus,
 	"whois":                        (*Handler).serveWhoIs,
 }
@@ -110,6 +106,9 @@ var handler = map[string]LocalAPIHandler{
 func init() {
 	if buildfeatures.HasAppConnectors {
 		Register("appc-route-info", (*Handler).serveGetAppcRouteInfo)
+	}
+	if buildfeatures.HasAdvertiseRoutes {
+		Register("check-ip-forwarding", (*Handler).serveCheckIPForwarding)
 	}
 	if buildfeatures.HasUseExitNode {
 		Register("suggest-exit-node", (*Handler).serveSuggestExitNode)
@@ -121,6 +120,13 @@ func init() {
 	if buildfeatures.HasDebug {
 		Register("bugreport", (*Handler).serveBugReport)
 		Register("pprof", (*Handler).servePprof)
+	}
+	if buildfeatures.HasDNS {
+		Register("dns-osconfig", (*Handler).serveDNSOSConfig)
+		Register("dns-query", (*Handler).serveDNSQuery)
+	}
+	if buildfeatures.HasUserMetrics {
+		Register("usermetrics", (*Handler).serveUserMetrics)
 	}
 }
 

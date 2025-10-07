@@ -24,7 +24,6 @@ import (
 	"go4.org/mem"
 	"tailscale.com/disco"
 	"tailscale.com/feature/buildfeatures"
-	tsmetrics "tailscale.com/metrics"
 	"tailscale.com/net/connstats"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/packet/checksum"
@@ -213,8 +212,8 @@ type Wrapper struct {
 }
 
 type metrics struct {
-	inboundDroppedPacketsTotal  *tsmetrics.MultiLabelMap[usermetric.DropLabels]
-	outboundDroppedPacketsTotal *tsmetrics.MultiLabelMap[usermetric.DropLabels]
+	inboundDroppedPacketsTotal  *usermetric.MultiLabelMap[usermetric.DropLabels]
+	outboundDroppedPacketsTotal *usermetric.MultiLabelMap[usermetric.DropLabels]
 }
 
 func registerMetrics(reg *usermetric.Registry) *metrics {
@@ -312,7 +311,9 @@ func (t *Wrapper) now() time.Time {
 //
 // The map ownership passes to the Wrapper. It must be non-nil.
 func (t *Wrapper) SetDestIPActivityFuncs(m map[netip.Addr]func()) {
-	t.destIPActivity.Store(m)
+	if buildfeatures.HasLazyWG {
+		t.destIPActivity.Store(m)
+	}
 }
 
 // SetDiscoKey sets the current discovery key.
@@ -948,12 +949,14 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	for _, data := range res.data {
 		p.Decode(data[res.dataOffset:])
 
-		if m := t.destIPActivity.Load(); m != nil {
-			if fn := m[p.Dst.Addr()]; fn != nil {
-				fn()
+		if buildfeatures.HasLazyWG {
+			if m := t.destIPActivity.Load(); m != nil {
+				if fn := m[p.Dst.Addr()]; fn != nil {
+					fn()
+				}
 			}
 		}
-		if captHook != nil {
+		if buildfeatures.HasCapture && captHook != nil {
 			captHook(packet.FromLocal, t.now(), p.Buffer(), p.CaptureMeta)
 		}
 		if !t.disableFilter {
@@ -1085,9 +1088,11 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, outBuffs [][]byte, sizes []i
 	pc.snat(p)
 	invertGSOChecksum(pkt, gso)
 
-	if m := t.destIPActivity.Load(); m != nil {
-		if fn := m[p.Dst.Addr()]; fn != nil {
-			fn()
+	if buildfeatures.HasLazyWG {
+		if m := t.destIPActivity.Load(); m != nil {
+			if fn := m[p.Dst.Addr()]; fn != nil {
+				fn()
+			}
 		}
 	}
 
