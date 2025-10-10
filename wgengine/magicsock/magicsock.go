@@ -803,6 +803,11 @@ func registerMetrics(reg *usermetric.Registry) *metrics {
 	metricRecvDataPacketsDERP.Register(&m.inboundPacketsDERPTotal)
 	metricRecvDataPacketsPeerRelayIPv4.Register(&m.inboundPacketsPeerRelayIPv4Total)
 	metricRecvDataPacketsPeerRelayIPv6.Register(&m.inboundPacketsPeerRelayIPv6Total)
+	metricRecvDataBytesIPv4.Register(&m.inboundBytesIPv4Total)
+	metricRecvDataBytesIPv6.Register(&m.inboundBytesIPv6Total)
+	metricRecvDataBytesDERP.Register(&m.inboundBytesDERPTotal)
+	metricRecvDataBytesPeerRelayIPv4.Register(&m.inboundBytesPeerRelayIPv4Total)
+	metricRecvDataBytesPeerRelayIPv6.Register(&m.inboundBytesPeerRelayIPv6Total)
 	metricSendUDP.Register(&m.outboundPacketsIPv4Total)
 	metricSendUDP.Register(&m.outboundPacketsIPv6Total)
 	metricSendDERP.Register(&m.outboundPacketsDERPTotal)
@@ -840,12 +845,17 @@ func registerMetrics(reg *usermetric.Registry) *metrics {
 
 // deregisterMetrics unregisters the underlying usermetrics expvar counters
 // from clientmetrics.
-func deregisterMetrics(m *metrics) {
+func deregisterMetrics() {
 	metricRecvDataPacketsIPv4.UnregisterAll()
 	metricRecvDataPacketsIPv6.UnregisterAll()
 	metricRecvDataPacketsDERP.UnregisterAll()
 	metricRecvDataPacketsPeerRelayIPv4.UnregisterAll()
 	metricRecvDataPacketsPeerRelayIPv6.UnregisterAll()
+	metricRecvDataBytesIPv4.UnregisterAll()
+	metricRecvDataBytesIPv6.UnregisterAll()
+	metricRecvDataBytesDERP.UnregisterAll()
+	metricRecvDataBytesPeerRelayIPv4.UnregisterAll()
+	metricRecvDataBytesPeerRelayIPv6.UnregisterAll()
 	metricSendUDP.UnregisterAll()
 	metricSendDERP.UnregisterAll()
 	metricSendPeerRelay.UnregisterAll()
@@ -3329,7 +3339,7 @@ func (c *Conn) Close() error {
 		pinger.Close()
 	}
 
-	deregisterMetrics(c.metrics)
+	deregisterMetrics()
 
 	return nil
 }
@@ -3919,12 +3929,19 @@ var (
 	metricSendDERPErrorClosed = clientmetric.NewCounter("magicsock_send_derp_error_closed")
 	metricSendDERPErrorQueue  = clientmetric.NewCounter("magicsock_send_derp_error_queue")
 	metricSendDERPDropped     = clientmetric.NewCounter("magicsock_send_derp_dropped")
-	metricSendUDP             = clientmetric.NewAggregateCounter("magicsock_send_udp")
 	metricSendUDPError        = clientmetric.NewCounter("magicsock_send_udp_error")
-	metricSendPeerRelay       = clientmetric.NewAggregateCounter("magicsock_send_peer_relay")
 	metricSendPeerRelayError  = clientmetric.NewCounter("magicsock_send_peer_relay_error")
-	metricSendDERP            = clientmetric.NewAggregateCounter("magicsock_send_derp")
 	metricSendDERPError       = clientmetric.NewCounter("magicsock_send_derp_error")
+
+	// Sends (data)
+	//
+	// Note: Prior to v1.78 metricSendUDP & metricSendDERP counted sends of data
+	// AND disco packets. They were updated in v1.78 to only count data packets.
+	// metricSendPeerRelay was added in v1.86 and has always counted only data
+	// packets.
+	metricSendUDP       = clientmetric.NewAggregateCounter("magicsock_send_udp")
+	metricSendPeerRelay = clientmetric.NewAggregateCounter("magicsock_send_peer_relay")
+	metricSendDERP      = clientmetric.NewAggregateCounter("magicsock_send_derp")
 
 	// Data packets (non-disco)
 	metricSendData                     = clientmetric.NewCounter("magicsock_send_data")
@@ -3934,6 +3951,13 @@ var (
 	metricRecvDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
 	metricRecvDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
 	metricRecvDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
+
+	// Data bytes (non-disco)
+	metricRecvDataBytesDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_derp")
+	metricRecvDataBytesIPv4          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_ipv4")
+	metricRecvDataBytesIPv6          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_ipv6")
+	metricRecvDataBytesPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_peer_relay_ipv4")
+	metricRecvDataBytesPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_peer_relay_ipv6")
 
 	// Disco packets
 	metricSendDiscoUDP                           = clientmetric.NewCounter("magicsock_disco_send_udp")
