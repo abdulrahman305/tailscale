@@ -27,6 +27,7 @@ import (
 	"tailscale.com/net/netns"
 	"tailscale.com/net/netx"
 	"tailscale.com/net/tsaddr"
+	"tailscale.com/syncs"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/util/clientmetric"
@@ -86,7 +87,7 @@ type Dialer struct {
 
 	routes atomic.Pointer[bart.Table[bool]] // or nil if UserDial should not use routes. `true` indicates routes that point into the Tailscale interface
 
-	mu               sync.Mutex
+	mu               syncs.Mutex
 	closed           bool
 	dns              dnsMap
 	tunName          string // tun device name
@@ -96,6 +97,7 @@ type Dialer struct {
 	dnsCache         *dnscache.MessageCache // nil until first non-empty SetExitDNSDoH
 	nextSysConnID    int
 	activeSysConns   map[int]net.Conn // active connections not yet closed
+	bus              *eventbus.Bus    // only used for comparison with already set bus.
 	eventClient      *eventbus.Client
 	eventBusSubs     eventbus.Monitor
 }
@@ -226,14 +228,17 @@ func (d *Dialer) NetMon() *netmon.Monitor {
 func (d *Dialer) SetBus(bus *eventbus.Bus) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.eventClient != nil {
-		panic("eventbus has already been set")
+	if d.bus == bus {
+		return
+	} else if d.bus != nil {
+		panic("different eventbus has already been set")
 	}
 	// Having multiple watchers could lead to problems,
 	// so unregister the callback if it exists.
 	if d.netMonUnregister != nil {
 		d.netMonUnregister()
 	}
+	d.bus = bus
 	d.eventClient = bus.Client("tsdial.Dialer")
 	d.eventBusSubs = d.eventClient.Monitor(d.linkChangeWatcher(d.eventClient))
 }
